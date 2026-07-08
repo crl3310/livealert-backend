@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 # Load environmental workspace secrets from .env file
 load_dotenv()
 
+
 app = Flask(__name__)
 
 # --- Email SMTP Configuration ---
@@ -17,6 +18,7 @@ app.config['MAIL_USE_TLS'] = True
 app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_USERNAME')
+
 
 # Initialize Mail instance globally
 mail = Mail(app)
@@ -40,8 +42,10 @@ except Exception as e:
 # Register Blueprints (routes) from our sub-folders
 from auth.register import auth_bp 
 import auth.login 
-import auth.verify # Discovers the new email verification endpoints
+import auth.verify
+from live.live import live_bp 
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(live_bp, url_prefix='/api/live')
 
 @app.route('/', methods=['GET'])
 def gateway_status():
