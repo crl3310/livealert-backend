@@ -1,11 +1,12 @@
 from flask import Blueprint, request, jsonify
 from firebase_admin import auth, firestore
 
+# Initialize Blueprint FIRST so other files can safely import it
 auth_bp = Blueprint('auth', __name__)
 
 @auth_bp.route('/register', methods=['POST'])
 def register():
-    # 1. Grab the entire live server module object to bypass the stale variable cache
+    # Grab the entire live server module object to bypass the stale variable cache
     import server 
     
     data = request.get_json() or {}
@@ -22,11 +23,22 @@ def register():
         return jsonify({"success": False, "message": "Email and password are required"}), 400
         
     try:
-        # 2. Create user in Firebase Authentication using email/password
+        if server.db is None:
+            return jsonify({"success": False, "message": "Database client is uninitialized on server."}), 500
+
+        # --- Security Check: Force Email Verification First ---
+        verify_doc = server.db.collection('VerificationCodes').document(email).get()
+        if not verify_doc.exists or not verify_doc.to_dict().get('verified', False):
+            return jsonify({
+                "success": False, 
+                "message": "Email address not verified. Please verify your 6-digit code first."
+            }), 403
+        
+        # Create user in Firebase Authentication using email/password
         user_record = auth.create_user(email=email, password=password)
         uid = user_record.uid
         
-        # 3. Parse birthdate string
+        # Parse birthdate string
         birthdate_value = None
         if birthdate_str:
             try:
@@ -35,19 +47,16 @@ def register():
             except ValueError:
                 return jsonify({"success": False, "message": "Birthdate must be in YYYY-MM-DD format"}), 400
 
-        # 4. Save directly using server.db
-        if server.db is not None:
-            server.db.collection('Users').document(uid).set({
-                'address': address,
-                'birthdate': birthdate_value,
-                'contactNumber': contact_number,
-                'email': email,
-                'firstName': first_name,
-                'lastName': last_name
-            })
-        else:
-            # Let us know immediately if the db connection didn't initialize globally
-            return jsonify({"success": False, "message": "Database client is uninitialized on server."}), 500
+        # Save profile directly inside Firestore
+        server.db.collection('Users').document(uid).set({
+            'address': address,
+            'birthdate': birthdate_value,
+            'contactNumber': contact_number,
+            'email': email,
+            'firstName': first_name,
+            'lastName': last_name,
+            'isVerified': True # Explicitly record status on their profile
+        })
         
         return jsonify({
             "success": True, 
@@ -57,3 +66,6 @@ def register():
         
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 400
+
+# --- FIX: Import verification paths down here down below to completely prevent circular dependency errors ---
+from . import verify

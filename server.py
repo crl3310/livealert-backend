@@ -1,9 +1,27 @@
+import os
 from flask import Flask, jsonify
+from flask_mailman import Mail
 import firebase_admin
 from firebase_admin import credentials, firestore
+from dotenv import load_dotenv
+
+# Load environmental workspace secrets from .env file
+load_dotenv()
 
 app = Flask(__name__)
 
+# --- Email SMTP Configuration ---
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_USERNAME')
+
+# Initialize Mail instance globally
+mail = Mail(app)
+
+# --- Firebase Initialization ---
 db = None
 try:
     cred = credentials.Certificate("firebase-credentials.json")
@@ -22,6 +40,7 @@ except Exception as e:
 # Register Blueprints (routes) from our sub-folders
 from auth.register import auth_bp 
 import auth.login 
+import auth.verify # Discovers the new email verification endpoints
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 
 @app.route('/', methods=['GET'])
