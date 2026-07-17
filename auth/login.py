@@ -21,6 +21,18 @@ def login():
         return jsonify({"success": False, "message": "Backend configuration error: Missing API Key."}), 500
         
     try:
+        if server.db is None:
+            return jsonify({"success": False, "message": "Database client uninitialized."}), 500
+
+        # --- NEW SECURITY CHECK: Force Verification Doc Check during Login ---
+        verify_doc = server.db.collection('VerificationCodes').document(email).get()
+        if not verify_doc.exists or not verify_doc.to_dict().get('verified', False):
+            return jsonify({
+                "success": False, 
+                "message": "Email address not verified. Please verify your 6-digit code first.",
+                "requiresVerification": True
+            }), 403
+
         # 1. Hit Firebase's official REST API to verify credentials
         firebase_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
         payload = {
@@ -44,12 +56,11 @@ def login():
         
         # 3. Fetch user profile data from Firestore 'Users' collection
         user_profile = {}
-        if server.db is not None:
-            user_doc = server.db.collection('Users').document(uid).get()
-            if user_doc.exists:
-                user_profile = user_doc.to_dict()
-                if 'birthdate' in user_profile and user_profile['birthdate']:
-                    user_profile['birthdate'] = user_profile['birthdate'].strftime('%Y-%m-%d')
+        user_doc = server.db.collection('Users').document(uid).get()
+        if user_doc.exists:
+            user_profile = user_doc.to_dict()
+            if 'birthdate' in user_profile and user_profile['birthdate']:
+                user_profile['birthdate'] = user_profile['birthdate'].strftime('%Y-%m-%d')
         
         return jsonify({
             "success": True,

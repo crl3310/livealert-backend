@@ -3,3 +3,6 @@ firebase-admin==6.5.0
 requests==2.32.3
 python-dotenv==1.0.1
 Flask-Mailman==3.0.0
+geopy==2.5.0
+google-genai==2.11.0
+agora-token-builder==1.0.0
