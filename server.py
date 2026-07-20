@@ -44,6 +44,8 @@ from auth.register import auth_bp
 import auth.login 
 import auth.verify
 from live.live import live_bp 
+from community.routes import community_bp
+app.register_blueprint(community_bp, url_prefix='/api/community')
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(live_bp, url_prefix='/api/live')
 
