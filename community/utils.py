@@ -11,6 +11,9 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return round(R * c, 2)
 
+# Alias for route imports
+calculate_distance_km = calculate_distance
+
 def get_readable_address(latitude, longitude):
     """Converts latitude and longitude into a real, readable street address."""
     if latitude is None or longitude is None:
