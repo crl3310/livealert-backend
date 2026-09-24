@@ -59,17 +59,6 @@ def gateway_status():
         "message": "LiveAlert Main Gateway is active and linked to Firestore!"
     })
 
-# --- Temporary Test Route for Postman ---
-
-
-    # Add test call document to ActiveCalls in Firestore
-    update_time, doc_ref = db.collection('ActiveCalls').add(test_call_data)
-
-    return jsonify({
-        "status": "success",
-        "message": f"Test call created and assigned to unit {test_unit_id}",
-        "callId": doc_ref.id
-    }), 200
 
 if __name__ == '__main__':
     # --- Start Realtime Firestore Listener ---
