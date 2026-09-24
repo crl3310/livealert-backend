@@ -34,21 +34,21 @@ def send_push_to_unit(station_id, unit_id, call_id, call_data):
         return
 
     try:
-        # Build base query for station and duty status using FieldFilter syntax
+        # Use .where(filter=FieldFilter(...)) instead of .filter(...)
         query = server.db.collection('Responders') \
-            .filter(filter=FieldFilter('stationId', '==', station_id)) \
-            .filter(filter=FieldFilter('duty', '==', 'on_duty'))
+            .where(filter=FieldFilter('stationId', '==', station_id)) \
+            .where(filter=FieldFilter('duty', '==', 'on_duty'))
 
         # Add unit filter if unitId is defined on the call
         if unit_id:
-            query = query.filter(filter=FieldFilter('unitId', '==', unit_id))
+            query = query.where(filter=FieldFilter('unitId', '==', unit_id))
 
         responders = query.stream()
 
         fcm_tokens = []
         for doc in responders:
             data = doc.to_dict()
-            token = data.get('fcmToken')  # Token registered during mobile login
+            token = data.get('fcmToken')
             if token:
                 fcm_tokens.append(token)
 
