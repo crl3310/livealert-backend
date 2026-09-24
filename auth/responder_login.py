@@ -33,6 +33,8 @@ def responder_login():
     
     email = data.get('email')
     password = data.get('password')
+    fcm_token = data.get('fcmToken')  # Extract optional FCM token from login body
+    duty_status = data.get('duty')    # Extract optional duty status override
 
     if not email or not password:
         return jsonify({"success": False, "message": "Missing email or password."}), 400
@@ -67,7 +69,8 @@ def responder_login():
 
         # 2. Verify responder role in Firestore
         responder_profile = {}
-        responder_doc = server.db.collection('Responders').document(uid).get()
+        responder_ref = server.db.collection('Responders').document(uid)
+        responder_doc = responder_ref.get()
 
         if responder_doc.exists:
             responder_profile = responder_doc.to_dict()
@@ -88,7 +91,25 @@ def responder_login():
                     "message": "Responder profile not found."
                 }), 404
 
-        # 3. Retrieve assigned Station information
+        # 3. Register/Update FCM Token and Duty Status in Firestore upon successful login
+        update_data = {}
+        if fcm_token:
+            update_data["fcmToken"] = fcm_token
+            responder_profile["fcmToken"] = fcm_token
+
+        # Update duty status if provided, or default to on_duty upon login if missing
+        if duty_status:
+            val = str(duty_status).lower()
+            update_data["duty"] = "on_duty" if val in ['on', 'on_duty', 'online', 'true'] else "off_duty"
+            responder_profile["duty"] = update_data["duty"]
+        elif "duty" not in responder_profile:
+            update_data["duty"] = "on_duty"
+            responder_profile["duty"] = "on_duty"
+
+        if update_data:
+            responder_ref.set(update_data, merge=True)
+
+        # 4. Retrieve assigned Station information
         station_info = None
         station_id = responder_profile.get('stationId')
         if station_id:
