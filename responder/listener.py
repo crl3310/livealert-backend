@@ -1,17 +1,34 @@
 import threading
+import json
 from firebase_admin import messaging, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+
+# Tracks initial startup load to prevent historical docs from triggering notifications
+_initial_snapshot_complete = False
 
 def on_active_calls_snapshot(col_snapshot, changes, read_time):
     """
     Callback executed when ActiveCalls documents are created or modified.
     """
+    global _initial_snapshot_complete
+
+    # Skip processing historical records on initial server startup
+    if not _initial_snapshot_complete:
+        _initial_snapshot_complete = True
+        print(f"ℹ️ Listener initialized. Loaded {len(col_snapshot)} existing calls without triggering alerts.")
+        return
+
     for change in changes:
         # Check for newly added calls or modified unit assignments
         if change.type.name in ['ADDED', 'MODIFIED']:
             call_data = change.document.to_dict()
             call_id = change.document.id
             
+            # Prevent re-firing for calls that have already sent push notifications
+            already_notified = call_data.get('notificationSent', False)
+            if already_notified:
+                continue
+
             # Safe extraction of nested assignedStation map object
             assigned_station = call_data.get('assignedStation') or {}
             
@@ -32,6 +49,8 @@ def on_active_calls_snapshot(col_snapshot, changes, read_time):
             if dispatch_status == 'PENDING':
                 units_display = ", ".join(unit_ids) if unit_ids else "All Units"
                 print(f"🚨 ALERT: Emergency '{call_id}' assigned to Station '{station_id}', Units: [{units_display}]")
+                
+                # Send the push notification
                 send_push_to_units(station_id, unit_ids, call_id, call_data)
 
 def send_push_to_units(station_id, unit_ids, call_id, call_data):
@@ -69,12 +88,14 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
 
         # Prepare FCM multicast message
         units_str = ", ".join(unit_ids) if unit_ids else "Assigned Units"
+        json_ids = json.dumps(unit_ids) if unit_ids else "[]"
+
         message = messaging.MulticastMessage(
             tokens=fcm_tokens,
             data={
                 "type": "NEW_ASSIGNMENT",
                 "callId": str(call_id),
-                "unitIds": json_ids if 'json_ids' in locals() else str(unit_ids),
+                "unitIds": json_ids,
                 "stationId": str(station_id or "")
             },
             notification=messaging.Notification(
@@ -85,6 +106,9 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
 
         response = messaging.send_each_for_multicast(message)
         print(f"📢 Notification successfully sent to {response.success_count} devices across assigned units.")
+
+        # Mark document as notified in Firestore so it won't trigger again
+        server.db.collection('ActiveCalls').document(call_id).update({'notificationSent': True})
 
     except Exception as e:
         print(f"❌ Failed to send FCM push notification: {str(e)}")
