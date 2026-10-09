@@ -15,33 +15,44 @@ def on_active_calls_snapshot(col_snapshot, changes, read_time):
             # Safe extraction of nested assignedStation map object
             assigned_station = call_data.get('assignedStation') or {}
             
-            # Check top-level fields or fallback to nested assignedStation values
-            unit_id = call_data.get('unitId') or assigned_station.get('unitId')
+            # Extract unitIds (list) or fallback to single unitId (string)
+            unit_ids = call_data.get('unitIds') or assigned_station.get('unitIds')
+            single_unit = call_data.get('unitId') or assigned_station.get('unitId')
+
+            # Normalize to a list of unit IDs
+            if not unit_ids:
+                unit_ids = [single_unit] if single_unit else []
+            elif isinstance(unit_ids, str):
+                unit_ids = [unit_ids]
+
             station_id = call_data.get('stationId') or assigned_station.get('stationId')
             dispatch_status = call_data.get('dispatchStatus') or assigned_station.get('dispatchStatus')
 
             # Fire notification only if call is PENDING and station is present
             if dispatch_status == 'PENDING':
-                print(f"🚨 ALERT: Emergency '{call_id}' assigned to Station '{station_id}', Unit '{unit_id}'")
-                send_push_to_unit(station_id, unit_id, call_id, call_data)
+                units_display = ", ".join(unit_ids) if unit_ids else "All Units"
+                print(f"🚨 ALERT: Emergency '{call_id}' assigned to Station '{station_id}', Units: [{units_display}]")
+                send_push_to_units(station_id, unit_ids, call_id, call_data)
 
-def send_push_to_unit(station_id, unit_id, call_id, call_data):
+def send_push_to_units(station_id, unit_ids, call_id, call_data):
     """
-    Queries on-duty responders belonging to stationId/unitId and sends FCM push notifications.
+    Queries on-duty responders belonging to stationId and matching any of the unitIds,
+    then sends FCM push notifications.
     """
     import server
     if server.db is None:
         return
 
     try:
-        # Use .where(filter=FieldFilter(...)) instead of .filter(...)
+        # Base query: Station match and On Duty status
         query = server.db.collection('Responders') \
             .where(filter=FieldFilter('stationId', '==', station_id)) \
             .where(filter=FieldFilter('duty', '==', 'on_duty'))
 
-        # Add unit filter if unitId is defined on the call
-        if unit_id:
-            query = query.where(filter=FieldFilter('unitId', '==', unit_id))
+        # Filter by unitIds using 'in' operator if provided
+        if unit_ids:
+            # Firestore 'in' query allows up to 30 items per batch
+            query = query.where(filter=FieldFilter('unitId', 'in', unit_ids[:30]))
 
         responders = query.stream()
 
@@ -53,26 +64,27 @@ def send_push_to_unit(station_id, unit_id, call_id, call_data):
                 fcm_tokens.append(token)
 
         if not fcm_tokens:
-            print(f"ℹ️ No active FCM tokens found for on-duty responders in station {station_id} (unit {unit_id}).")
+            print(f"ℹ️ No active FCM tokens found for on-duty responders in station {station_id} for units {unit_ids}.")
             return
 
         # Prepare FCM multicast message
+        units_str = ", ".join(unit_ids) if unit_ids else "Assigned Units"
         message = messaging.MulticastMessage(
             tokens=fcm_tokens,
             data={
                 "type": "NEW_ASSIGNMENT",
                 "callId": str(call_id),
-                "unitId": str(unit_id or ""),
+                "unitIds": json_ids if 'json_ids' in locals() else str(unit_ids),
                 "stationId": str(station_id or "")
             },
             notification=messaging.Notification(
                 title="🚨 Emergency Call Assigned",
-                body=f"Unit {unit_id or 'Assigned Unit'} has been dispatched to a new call."
+                body=f"Units [{units_str}] have been dispatched to a new call."
             )
         )
 
         response = messaging.send_each_for_multicast(message)
-        print(f"📢 Notification successfully sent to {response.success_count} devices.")
+        print(f"📢 Notification successfully sent to {response.success_count} devices across assigned units.")
 
     except Exception as e:
         print(f"❌ Failed to send FCM push notification: {str(e)}")
