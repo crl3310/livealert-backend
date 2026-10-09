@@ -86,6 +86,7 @@ def analyze_video():
     video_file.save(temp_file_path)
 
     try:
+        # 1. Upload video clip to Gemini API
         gemini_file = client.files.upload(file=temp_file_path)
         while gemini_file.state.name == "PROCESSING":
             time.sleep(1)
@@ -94,15 +95,22 @@ def analyze_video():
         if gemini_file.state.name == "FAILED":
             raise Exception("Gemini video processing failed.")
 
+        # 2. Detailed prompt instructing Gemini on screen detection, audio inspection, and classification
         prompt = (
-            "Analyze the following 10-15 second video and audio clip captured by a citizen. "
-            "Examine both the video track for physical hazards and the audio track for sounds of distress "
-            "(screams, crashes, gunfire, arguments). Classified incidents must align directly with the rubric "
-            "provided in the response schema parameters."
+            "Analyze the following video and audio clip captured by a citizen in real-time.\n\n"
+            "VISUAL INSPECTION:\n"
+            "1. Check if the camera is recording a secondary screen (e.g., laptop display, mobile screen, TV, monitor, glare, moiré patterns, or bezels). "
+            "If the footage is recorded off a screen, flag is_screen_recording as true and is_fake as true.\n"
+            "2. Look for real, live physical hazards or incidents occurring in the physical environment.\n\n"
+            "AUDIO INSPECTION:\n"
+            "1. Listen closely to the audio track for real ambient sounds of distress (screams, arguments, crash impacts, gunshots, glass breaking, sirens).\n\n"
+            "FLAGGING RULE:\n"
+            "If the clip shows screen playback, a prank, staged acting, or no real active emergency visual/audio, "
+            "flag is_fake as true and is_emergency as false."
         )
         
         response = client.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=[gemini_file, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -111,12 +119,45 @@ def analyze_video():
         )
 
         analysis_data = json.loads(response.text)
+
+        # 3. Check if the report is fake, recorded off a screen, or non-emergency
+        is_fake = (
+            analysis_data.get('is_fake', False) 
+            or not analysis_data.get('is_emergency', True)
+            or analysis_data.get('is_screen_recording', False)
+        )
+
+        if is_fake:
+            # HALT DISPATCH: Update Firestore status to rejected/fake
+            update_payload = {
+                'status': 'cancelled_fake',
+                'incidentType': analysis_data.get('incident_type', 'Fake/Non-Emergency'),
+                'threatLevel': 'NONE',
+                'ai_summary': f"REJECTED: {analysis_data.get('summary', 'Fake, screen recording, or non-emergency report detected.')}",
+                'analyzed_at': datetime.now(timezone.utc),
+                'assignedStation.dispatchStatus': 'REJECTED'
+            }
+            
+            server.db.collection('ActiveCalls').document(channel_name).update(update_payload)
+            
+            # Cleanup temp resources
+            client.files.delete(name=gemini_file.name)
+            if os.path.exists(temp_file_path): 
+                os.remove(temp_file_path)
+
+            return jsonify({
+                "success": False, 
+                "is_fake": True,
+                "message": "Report rejected. AI detected fake content, screen playback, or non-emergency situation.",
+                "assessment": analysis_data
+            }), 200
+
+        # 4. VALID EMERGENCY: Mark as 'incoming' to trigger dispatch
         update_payload = {
             'status': 'incoming',  
-            'incidentType': analysis_data.get('incident_type'),
-            'threatLevel': analysis_data.get('threat_level'),
+            'incidentType': analysis_data.get('incident_type', 'General Emergency'),
+            'threatLevel': analysis_data.get('threat_level', 'MEDIUM'),
             'ai_summary': analysis_data.get('summary'),
-            'ai_reasoning': analysis_data.get('reasoning'),
             'analyzed_at': datetime.now(timezone.utc)
         }
 
@@ -128,10 +169,20 @@ def analyze_video():
             }
 
         server.db.collection('ActiveCalls').document(channel_name).update(update_payload)
+        
+        # Cleanup temp resources
         client.files.delete(name=gemini_file.name)
-        if os.path.exists(temp_file_path): os.remove(temp_file_path)
+        if os.path.exists(temp_file_path): 
+            os.remove(temp_file_path)
 
-        return jsonify({"success": True, "message": "Emergency analyzed.", "assessment": analysis_data}), 200
+        return jsonify({
+            "success": True, 
+            "is_fake": False,
+            "message": "Emergency analyzed and dispatched successfully.", 
+            "assessment": analysis_data
+        }), 200
+
     except Exception as e:
-        if os.path.exists(temp_file_path): os.remove(temp_file_path)
+        if os.path.exists(temp_file_path): 
+            os.remove(temp_file_path)
         return jsonify({"success": False, "message": f"Analysis failed: {str(e)}"}), 500
