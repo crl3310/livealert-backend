@@ -47,43 +47,52 @@ def on_active_calls_snapshot(col_snapshot, changes, read_time):
 
             # Fire notification only if call is PENDING and station is present
             if dispatch_status == 'PENDING':
-                units_display = ", ".join(unit_ids) if unit_ids else "All Units"
+                units_display = ", ".join(unit_ids) if unit_ids else "No units assigned yet"
                 print(f"🚨 ALERT: Emergency '{call_id}' assigned to Station '{station_id}', Units: [{units_display}]")
                 
-                # Send the push notification
-                send_push_to_units(station_id, unit_ids, call_id, call_data)
+                # Only send the push notification if units are actually assigned
+                if unit_ids:
+                    send_push_to_units(station_id, unit_ids, call_id, call_data)
+                else:
+                    print(f"ℹ️ Waiting for units to be assigned to '{call_id}'...")
+                    # DO NOT mark notificationSent = True here, so future unit assignments can trigger it!
 
 def send_push_to_units(station_id, unit_ids, call_id, call_data):
     """
-    Queries on-duty responders belonging to stationId and matching any of the unitIds,
-    then sends FCM push notifications.
+    Fetches responders directly by document ID, then sends FCM push notifications.
     """
     import server
     if server.db is None:
         return
 
     try:
-        # Base query: Station match and On Duty status
-        query = server.db.collection('Responders') \
-            .where(filter=FieldFilter('stationId', '==', station_id)) \
-            .where(filter=FieldFilter('duty', '==', 'on_duty'))
-
-        # Filter by unitIds using 'in' operator if provided
-        if unit_ids:
-            # Firestore 'in' query allows up to 30 items per batch
-            query = query.where(filter=FieldFilter('unitId', 'in', unit_ids[:30]))
-
-        responders = query.stream()
-
         fcm_tokens = []
-        for doc in responders:
-            data = doc.to_dict()
-            token = data.get('fcmToken')
-            if token:
-                fcm_tokens.append(token)
+
+        # If specific unit document IDs are provided, fetch them directly by ID
+        if unit_ids:
+            for uid in unit_ids:
+                doc_ref = server.db.collection('Responders').document(uid).get()
+                if doc_ref.exists:
+                    doc_data = doc_ref.to_dict()
+                    if not station_id or doc_data.get('stationId') == station_id:
+                        token = doc_data.get('fcmToken')
+                        if token:
+                            fcm_tokens.append(token)
+        else:
+            # Fallback: query all on-duty responders for the station if no specific unit IDs
+            query = server.db.collection('Responders') \
+                .where(filter=FieldFilter('stationId', '==', station_id)) \
+                .where(filter=FieldFilter('duty', '==', 'on_duty'))
+            
+            responders = query.stream()
+            for doc in responders:
+                data = doc.to_dict()
+                token = data.get('fcmToken')
+                if token:
+                    fcm_tokens.append(token)
 
         if not fcm_tokens:
-            print(f"ℹ️ No active FCM tokens found for on-duty responders in station {station_id} for units {unit_ids}.")
+            print(f"ℹ️ No active FCM tokens found for units {unit_ids} in station {station_id}.")
             return
 
         # Prepare FCM multicast message
@@ -107,7 +116,7 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
         response = messaging.send_each_for_multicast(message)
         print(f"📢 Notification successfully sent to {response.success_count} devices across assigned units.")
 
-        # Mark document as notified in Firestore so it won't trigger again
+        # Mark document as notified in Firestore ONLY after successful notification
         server.db.collection('ActiveCalls').document(call_id).update({'notificationSent': True})
 
     except Exception as e:
