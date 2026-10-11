@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from google.cloud.firestore import GeoPoint
 from datetime import datetime, timezone
 
-responder_bp = Blueprint('responder', __name__)
+responder_bp = Blueprint('responder_location', __name__)
 
 @responder_bp.route('/location-update', methods=['POST'])
 def update_location():

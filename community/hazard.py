@@ -2,7 +2,7 @@ import os
 import tempfile
 import json
 import queue
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import request, jsonify, Blueprint, Response
 from google import genai
 from google.genai import types
@@ -87,7 +87,7 @@ def create_hazard():
         'description': description,
         'reporterUuid': reporter_uuid,
         'status': 'REPORTED',
-        'timestamp': datetime.now(timezone.utc),
+        'timestamp': datetime.now(timezone(timedelta(hours=8))),
         'ai_assessment': None
     }
 
@@ -155,7 +155,7 @@ def create_hazard():
         "locationName": hazard_payload.get('location', {}).get('address', 'Unknown Area'),
         "latitude": lat_val,
         "longitude": lon_val,
-        "timestamp": datetime.now().strftime('%I:%M %p'),
+        "timestamp": datetime.now(timezone(timedelta(hours=8))).strftime('%B %d, %Y at %I:%M %p UTC+8'),
         "assignedStation": hazard_payload.get('assignedStation'),
         "ai_assessment": hazard_payload.get('ai_assessment')
     })
@@ -172,6 +172,7 @@ def create_hazard():
 @community_bp.route('/hazards/list', methods=['GET'])
 def get_hazards():
     import server
+    from datetime import timezone, timedelta
 
     if server.db is None:
         return jsonify({"success": False, "message": "Database client uninitialized."}), 500
@@ -179,17 +180,23 @@ def get_hazards():
     try:
         hazards_ref = server.db.collection('Hazards').stream()
         hazards_list = []
+        
+        manila_tz = timezone(timedelta(hours=8))
 
         for doc in hazards_ref:
             hazard_data = doc.to_dict()
             
             ts = hazard_data.get('timestamp')
-            formatted_time = ts.strftime('%I:%M %p') if isinstance(ts, datetime) else "Just now"
+            if isinstance(ts, datetime):
+                formatted_time = ts.astimezone(manila_tz).strftime('%B %d, %Y at %I:%M %p')
+            else:
+                formatted_time = "Just now"
 
             hazards_list.append({
                 "id": doc.id,
                 "title": hazard_data.get('title'),
                 "category": hazard_data.get('category'),
+                "description": hazard_data.get('description', ''), # <-- ADD THIS LINE
                 "status": hazard_data.get('status', 'REPORTED'),
                 "locationName": hazard_data.get('location', {}).get('address', 'Unknown Area'),
                 "time": formatted_time,

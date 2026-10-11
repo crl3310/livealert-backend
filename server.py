@@ -43,14 +43,16 @@ import auth.login
 import auth.verify
 import auth.responder_login
 import auth.responder_changepass
+import responder.location
 from live.live import live_bp 
-from community.routes import community_bp
+from community.hazard import community_bp
 from responder.duty import responder_bp 
 
 app.register_blueprint(community_bp, url_prefix='/api/community')
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(live_bp, url_prefix='/api/live')
 app.register_blueprint(responder_bp, url_prefix='/api/responder')
+app.register_blueprint(responder.location.responder_bp, url_prefix='/api/responder')
 
 @app.route('/', methods=['GET'])
 def gateway_status():

@@ -24,6 +24,17 @@ def on_active_calls_snapshot(col_snapshot, changes, read_time):
             call_data = change.document.to_dict()
             call_id = change.document.id
             
+            # --- HANDLE CALL RESOLUTION / TERMINATION ---
+            status = call_data.get('status')
+            if status in ['resolved', 'cancelled_fake']:
+                # Prevent looping if we already sent the termination notice
+                if call_data.get('liveEndedNotified', False):
+                    continue
+                
+                print(f"🛑 Call '{call_id}' status changed to '{status}'. Ending live session...")
+                send_live_termination_push(call_id, call_data)
+                continue
+
             # Prevent re-firing for calls that have already sent push notifications
             already_notified = call_data.get('notificationSent', False)
             if already_notified:
@@ -125,6 +136,65 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
 
     except Exception as e:
         print(f"❌ Failed to send FCM push notification: {str(e)}")
+
+def send_live_termination_push(call_id, call_data):
+    """
+    Gathers tokens for assigned units and citizen, then broadcasts an end-live push message.
+    """
+    import server
+    if server.db is None:
+        return
+
+    try:
+        fcm_tokens = []
+
+        # 1. Gather responder tokens from assigned units
+        assigned_station = call_data.get('assignedStation') or {}
+        unit_ids = call_data.get('unitIds') or assigned_station.get('unitIds') or []
+        if isinstance(unit_ids, str):
+            unit_ids = [unit_ids]
+
+        if unit_ids:
+            for unit_id in unit_ids:
+                query = server.db.collection('Responders') \
+                    .where(filter=FieldFilter('unitId', '==', unit_id))
+                for doc in query.stream():
+                    token = doc.to_dict().get('fcmToken')
+                    if token:
+                        fcm_tokens.append(token)
+
+        # 2. Gather citizen token (if stored as reporterFcmToken)
+        citizen_token = call_data.get('reporterFcmToken')
+        if citizen_token:
+            fcm_tokens.append(citizen_token)
+
+        if not fcm_tokens:
+            print(f"ℹ️ No active FCM tokens found to terminate call '{call_id}'.")
+            server.db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
+            return
+
+        # Broadcast termination message
+        message = messaging.MulticastMessage(
+            tokens=fcm_tokens,
+            data={
+                "type": "END_LIVE_SESSION",
+                "callId": str(call_id),
+                "status": str(call_data.get('status', 'resolved'))
+            },
+            notification=messaging.Notification(
+                title="🔒 Emergency Call Resolved",
+                body="The incident has been marked as resolved by dispatch. Closing live session."
+            )
+        )
+
+        response = messaging.send_each_for_multicast(message)
+        print(f"🛑 Termination notice sent to {response.success_count} devices.")
+
+        # Mark that the termination notification has been handled
+        server.db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
+
+    except Exception as e:
+        print(f"❌ Failed to send live termination push: {str(e)}")
 
 def start_active_calls_listener():
     """
