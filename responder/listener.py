@@ -59,7 +59,7 @@ def on_active_calls_snapshot(col_snapshot, changes, read_time):
 
 def send_push_to_units(station_id, unit_ids, call_id, call_data):
     """
-    Fetches responders directly by document ID, then sends FCM push notifications.
+    Queries responders by their 'unitId' field, then sends FCM push notifications.
     """
     import server
     if server.db is None:
@@ -68,16 +68,20 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
     try:
         fcm_tokens = []
 
-        # If specific unit document IDs are provided, fetch them directly by ID
+        # Query responders where the 'unitId' field matches the assigned unit ID
         if unit_ids:
-            for uid in unit_ids:
-                doc_ref = server.db.collection('Responders').document(uid).get()
-                if doc_ref.exists:
-                    doc_data = doc_ref.to_dict()
+            for target_unit_id in unit_ids:
+                query = server.db.collection('Responders') \
+                    .where(filter=FieldFilter('unitId', '==', target_unit_id))
+                
+                responders = query.stream()
+                for doc in responders:
+                    doc_data = doc.to_dict()
                     if not station_id or doc_data.get('stationId') == station_id:
                         token = doc_data.get('fcmToken')
                         if token:
                             fcm_tokens.append(token)
+                            print(f"✅ Found FCM token for unit '{target_unit_id}'")
         else:
             # Fallback: query all on-duty responders for the station if no specific unit IDs
             query = server.db.collection('Responders') \
