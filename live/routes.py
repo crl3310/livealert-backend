@@ -1,3 +1,4 @@
+from .live import live_bp
 from flask import Blueprint, request, jsonify
 
 # Inside your live or citizen blueprint file

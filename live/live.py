@@ -2,6 +2,7 @@ import os
 import time
 import tempfile
 import json
+
 from datetime import datetime, timezone
 from flask import request, jsonify, Blueprint
 from agora_token_builder import RtcTokenBuilder
@@ -202,3 +203,5 @@ def analyze_video():
         if os.path.exists(temp_file_path): 
             os.remove(temp_file_path)
         return jsonify({"success": False, "message": f"Analysis failed: {str(e)}"}), 500
+
+from . import routes
