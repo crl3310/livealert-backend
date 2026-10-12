@@ -127,7 +127,7 @@ def analyze_video():
         )
         
         response = client.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=[gemini_file, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -150,7 +150,7 @@ def analyze_video():
                 'status': 'cancelled_fake',
                 'incidentType': analysis_data.get('incident_type', 'Fake/Non-Emergency'),
                 'threatLevel': 'NONE',
-                'ai_summary': f"REJECTED: {analysis_data.get('summary', 'Fake, screen recording, or non-emergency report detected.')}",
+                'ai_assessment': f"REJECTED: {analysis_data.get('summary', 'Fake, screen recording, or non-emergency report detected.')}",
                 'analyzed_at': datetime.now(timezone.utc),
                 'assignedStation.dispatchStatus': 'REJECTED'
             }
@@ -173,8 +173,8 @@ def analyze_video():
         update_payload = {
             'status': 'incoming',  
             'incidentType': analysis_data.get('incident_type', 'General Emergency'),
-            'threatLevel': analysis_data.get('threat_level', 'MEDIUM'),
-            'ai_summary': analysis_data.get('summary'),
+            'threatLevel': analysis_data.get('level') or analysis_data.get('threat_level', 'MEDIUM'),
+            'ai_assessment': analysis_data.get('summary'),
             'analyzed_at': datetime.now(timezone.utc)
         }
 

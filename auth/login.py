@@ -13,6 +13,7 @@ def login():
     data = request.get_json() or {}
     email = data.get('email')
     password = data.get('password')
+    fcm_token = data.get('fcmToken')  # <-- 1. Extract the FCM token sent from the mobile app
     
     if not email or not password:
         return jsonify({"success": False, "message": "Missing credentials"}), 400
@@ -54,6 +55,13 @@ def login():
         uid = res_data.get('localId')
         id_token = res_data.get('idToken')
         
+        # --- 2. SAVE OR UPDATE FCM TOKEN IN FIRESTORE ---
+        if fcm_token:
+            server.db.collection('Users').document(uid).set({
+                'fcmToken': fcm_token
+            }, merge=True)
+            print(f"📱 Updated FCM token for user {uid}")
+
         # 3. Fetch user profile data from Firestore 'Users' collection
         user_profile = {}
         user_doc = server.db.collection('Users').document(uid).get()

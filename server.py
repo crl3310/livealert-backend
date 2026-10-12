@@ -50,6 +50,7 @@ from community.hazard import community_bp
 from responder.duty import responder_bp
 from responder.history_unit import responder_history_bp
 
+
 app.register_blueprint(community_bp, url_prefix='/api/community')
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(live_bp, url_prefix='/api/live')
@@ -71,6 +72,8 @@ if __name__ == '__main__':
     if db:
         try:
             from responder.listener import start_active_calls_listener
+            from live.user_listener import setup_active_calls_listener
+            setup_active_calls_listener(db)
             start_active_calls_listener()
         except Exception as e:
             print(f"❌ Failed to start active calls listener: {e}")
