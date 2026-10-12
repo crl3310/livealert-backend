@@ -37,10 +37,11 @@ def get_unit_call_history(unit_id):
         return jsonify({"success": False, "message": "Database client uninitialized."}), 500
 
     try:
-        # Target the nested assignedStation.unitIds array field
+        # Query matching the composite index: assignedStation.unitIds -> status -> timestamp
         query = server.db.collection('ActiveCalls') \
             .where(filter=FieldFilter('assignedStation.unitIds', 'array_contains', unit_id)) \
             .where(filter=FieldFilter('status', 'in', ['resolved', 'fake'])) \
+            .order_by('status') \
             .order_by('timestamp', direction=firestore.Query.DESCENDING) \
             .limit(20)
 
@@ -59,4 +60,5 @@ def get_unit_call_history(unit_id):
         }), 200
 
     except Exception as e:
+        print(f"❌ Error in unit history: {str(e)}")
         return jsonify({"success": False, "message": f"Failed to retrieve responder history: {str(e)}"}), 500
