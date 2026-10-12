@@ -163,17 +163,24 @@ def send_live_termination_push(call_id, call_data):
                     if token:
                         fcm_tokens.append(token)
 
-        # 2. Gather citizen token (if stored as reporterFcmToken)
-        citizen_token = call_data.get('reporterFcmToken')
-        if citizen_token:
-            fcm_tokens.append(citizen_token)
+        # 2. Gather citizen token using reporterUuid (Lookup in Users collection)
+        reporter_uuid = call_data.get('reporterUuid')
+        if reporter_uuid:
+            user_doc = server.db.collection('Users').document(reporter_uuid).get()
+            if user_doc.exists:
+                citizen_token = user_doc.to_dict().get('fcmToken')
+                if citizen_token:
+                    fcm_tokens.append(citizen_token)
+                    print(f"✅ Found citizen FCM token for reporter '{reporter_uuid}'")
+            else:
+                print(f"ℹ️ User document '{reporter_uuid}' not found.")
 
         if not fcm_tokens:
             print(f"ℹ️ No active FCM tokens found to terminate call '{call_id}'.")
             server.db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
             return
 
-        # Broadcast termination message
+        # Broadcast termination message to units and citizen simultaneously
         message = messaging.MulticastMessage(
             tokens=fcm_tokens,
             data={
@@ -183,12 +190,12 @@ def send_live_termination_push(call_id, call_data):
             },
             notification=messaging.Notification(
                 title="🔒 Emergency Call Resolved",
-                body="The incident has been marked as resolved by dispatch. Closing live session."
+                body="The incident has been marked as resolved. Closing live session."
             )
         )
 
         response = messaging.send_each_for_multicast(message)
-        print(f"🛑 Termination notice sent to {response.success_count} devices.")
+        print(f"🛑 Termination notice sent to {response.success_count} devices (Units + Citizen).")
 
         # Mark that the termination notification has been handled
         server.db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
