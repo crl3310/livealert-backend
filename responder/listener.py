@@ -25,8 +25,9 @@ def on_active_calls_snapshot(col_snapshot, changes, read_time):
             call_id = change.document.id
             
             # --- HANDLE CALL RESOLUTION / TERMINATION ---
-            status = call_data.get('status')
-            if status in ['resolved', 'cancelled_fake']:
+            status = call_data.get('status', '').lower()
+            # EXPANDED STATUS CHECK: Catch all variations of resolved/cancelled calls
+            if status in ['resolved', 'cancelled', 'cancelled_fake', 'fake']:
                 # Prevent looping if we already sent the termination notice
                 if call_data.get('liveEndedNotified', False):
                     continue
@@ -66,7 +67,6 @@ def on_active_calls_snapshot(col_snapshot, changes, read_time):
                     send_push_to_units(station_id, unit_ids, call_id, call_data)
                 else:
                     print(f"ℹ️ Waiting for units to be assigned to '{call_id}'...")
-                    # DO NOT mark notificationSent = True here, so future unit assignments can trigger it!
 
 def send_push_to_units(station_id, unit_ids, call_id, call_data):
     """
@@ -172,8 +172,10 @@ def send_live_termination_push(call_id, call_data):
                 if citizen_token:
                     fcm_tokens.append(citizen_token)
                     print(f"✅ Found citizen FCM token for reporter '{reporter_uuid}'")
+                else:
+                    print(f"⚠️ User document found for '{reporter_uuid}', but 'fcmToken' field is missing!")
             else:
-                print(f"ℹ️ User document '{reporter_uuid}' not found.")
+                print(f"⚠️ User document '{reporter_uuid}' not found in Users collection.")
 
         if not fcm_tokens:
             print(f"ℹ️ No active FCM tokens found to terminate call '{call_id}'.")

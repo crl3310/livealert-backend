@@ -1,7 +1,9 @@
 import os
+import uuid
 import requests
 from flask import request, jsonify
 from google.cloud.firestore import GeoPoint
+from firebase_admin import messaging
 from .register import auth_bp
 
 def serialize_doc(data):
@@ -33,20 +35,20 @@ def responder_login():
     
     email = data.get('email')
     password = data.get('password')
-    fcm_token = data.get('fcmToken')  # Extract optional FCM token from login body
-    duty_status = data.get('duty')    # Extract optional duty status override
+    fcm_token = data.get('fcmToken')  # Extract optional FCM token[cite: 5]
+    duty_status = data.get('duty')    # Extract optional duty status override[cite: 5]
 
     if not email or not password:
-        return jsonify({"success": False, "message": "Missing email or password."}), 400
+        return jsonify({"success": False, "message": "Missing email or password."}), 400[cite: 5]
 
     if not api_key:
-        return jsonify({"success": False, "message": "Backend configuration error: Missing API Key."}), 500
+        return jsonify({"success": False, "message": "Backend configuration error: Missing API Key."}), 500[cite: 5]
 
     try:
         if server.db is None:
-            return jsonify({"success": False, "message": "Database client uninitialized."}), 500
+            return jsonify({"success": False, "message": "Database client uninitialized."}), 500[cite: 5]
 
-        # 1. Authenticate credentials via Firebase Auth REST API
+        # 1. Authenticate credentials via Firebase Auth REST API[cite: 5]
         firebase_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
         payload = {
             "email": email,
@@ -61,13 +63,13 @@ def responder_login():
             error_msg = res_data.get('error', {}).get('message', 'Authentication failed')
             if error_msg == "INVALID_LOGIN_CREDENTIALS":
                 error_msg = "Invalid email or password."
-            return jsonify({"success": False, "message": error_msg}), 401
+            return jsonify({"success": False, "message": error_msg}), 401[cite: 5]
 
         uid = res_data.get('localId')
         id_token = res_data.get('idToken')
         refresh_token = res_data.get('refreshToken')
 
-        # 2. Verify responder role in Firestore
+        # 2. Verify responder role in Firestore[cite: 5]
         responder_profile = {}
         responder_ref = server.db.collection('Responders').document(uid)
         responder_doc = responder_ref.get()
@@ -84,20 +86,40 @@ def responder_login():
                     return jsonify({
                         "success": False, 
                         "message": "Access denied. Account is not registered as an emergency responder."
-                    }), 403
+                    }), 403[cite: 5]
             else:
                 return jsonify({
                     "success": False, 
                     "message": "Responder profile not found."
-                }), 404
+                }), 404[cite: 5]
 
-        # 3. Register/Update FCM Token and Duty Status in Firestore upon successful login
-        update_data = {}
+        # --- SINGLE-DEVICE SESSION ENFORCEMENT FOR RESPONDERS ---
+        old_fcm_token = responder_profile.get('fcmToken')
+        new_session_id = str(uuid.uuid4())
+
+        if old_fcm_token and fcm_token and old_fcm_token != fcm_token:
+            try:
+                logout_message = messaging.Message(
+                    token=old_fcm_token,
+                    data={
+                        "type": "FORCE_LOGOUT",
+                        "message": "Your responder account was logged in from another device."
+                    }
+                )
+                messaging.send(logout_message)
+                print(f"🔒 Sent FORCE_LOGOUT push to previous device for responder {uid}")
+            except Exception as e:
+                print(f"⚠️ Failed to send responder force logout notification: {e}")
+
+        # 3. Register/Update FCM Token, Session ID, and Duty Status in Firestore[cite: 5]
+        update_data = {
+            "sessionId": new_session_id
+        }
+        
         if fcm_token:
             update_data["fcmToken"] = fcm_token
             responder_profile["fcmToken"] = fcm_token
 
-        # Update duty status if provided, or default to on_duty upon login if missing
         if duty_status:
             val = str(duty_status).lower()
             update_data["duty"] = "on_duty" if val in ['on', 'on_duty', 'online', 'true'] else "off_duty"
@@ -106,19 +128,17 @@ def responder_login():
             update_data["duty"] = "on_duty"
             responder_profile["duty"] = "on_duty"
 
-        if update_data:
-            responder_ref.set(update_data, merge=True)
+        responder_ref.set(update_data, merge=True)
 
-        # 4. Retrieve assigned Station information
+        # 4. Retrieve assigned Station information[cite: 5]
         station_info = None
         station_id = responder_profile.get('stationId')
         if station_id:
             station_doc = server.db.collection('Stations').document(station_id).get()
             if station_doc.exists:
                 station_info = station_doc.to_dict()
-                station_info['id'] = station_doc.id
+                station_info['id'] = station_doc.id[cite: 5]
 
-        # Clean GeoPoint fields before returning response
         clean_profile = serialize_doc(responder_profile)
         clean_station = serialize_doc(station_info)
 
@@ -128,10 +148,11 @@ def responder_login():
             "uid": uid,
             "token": id_token,
             "refreshToken": refresh_token,
+            "sessionId": new_session_id,
             "role": clean_profile.get('role', 'responder'),
             "profile": clean_profile,
             "station": clean_station
-        }), 200
+        }), 200[cite: 5]
 
     except Exception as e:
-        return jsonify({"success": False, "message": f"Responder login failed: {str(e)}"}), 500
+        return jsonify({"success": False, "message": f"Responder login failed: {str(e)}"}), 500[cite: 5]

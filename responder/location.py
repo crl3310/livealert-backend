@@ -24,6 +24,15 @@ def update_location():
         if server.db is None:
             return jsonify({"success": False, "message": "Database client uninitialized."}), 500
 
+        doc_ref = server.db.collection('ActiveCalls').document(channel_name)
+        doc = doc_ref.get()
+
+        # GUARD CLAUSE: Ignore location updates if the emergency session is already closed
+        if doc.exists:
+            current_status = doc.to_dict().get('status')
+            if current_status in ['resolved', 'cancelled', 'cancelled_fake', 'fake']:
+                return jsonify({"success": True, "message": "Session closed. Location update ignored."}), 200
+
         lat_val = float(latitude)
         lon_val = float(longitude)
 
@@ -42,7 +51,7 @@ def update_location():
         }
 
         # Save to ActiveCalls in Firestore
-        server.db.collection('ActiveCalls').document(channel_name).update(unit_location_data)
+        doc_ref.update(unit_location_data)
 
         return jsonify({
             "success": True,
@@ -50,4 +59,4 @@ def update_location():
         }), 200
 
     except Exception as e:
-        return jsonify({"success": False, "message": f"Location update failed: {str(e)}"}), 500 
+        return jsonify({"success": False, "message": f"Location update failed: {str(e)}"}), 500
