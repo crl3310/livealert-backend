@@ -2,8 +2,10 @@ import os
 import tempfile
 import json
 import queue
+import uuid
 from datetime import datetime, timezone, timedelta
 from flask import request, jsonify, Blueprint, Response
+from firebase_admin import storage
 from google import genai
 from google.genai import types
 
@@ -13,9 +15,74 @@ from .utils import get_readable_address, find_nearest_police_station, calculate_
 community_bp = Blueprint('community', __name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+# Firebase Storage bucket where hazard photos are kept (name without "gs://").
+STORAGE_BUCKET = "livealert-d12cc.firebasestorage.app"
+MAX_HAZARD_IMAGES = 3
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB per photo
+
 # Tracks active real-time stream connections with subscriber locations
 # Format: [{"queue": Queue, "lat": float, "lon": float}, ...]
 subscribers = []
+
+
+def _sniff_image(data):
+    """Works out the image type from the file's first bytes (not from what the client claims).
+    Returns (extension, mime type) for JPEG / PNG / WebP, or None for anything else."""
+    if data[:3] == b'\xff\xd8\xff':
+        return 'jpg', 'image/jpeg'
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'png', 'image/png'
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'webp', 'image/webp'
+    return None
+
+
+def _read_hazard_images(files):
+    """Reads and validates the uploaded photos. Bad files are skipped, never fatal to the report."""
+    images = []
+    for f in files[:MAX_HAZARD_IMAGES]:
+        data = f.read(MAX_IMAGE_BYTES + 1)
+        if not data:
+            continue
+        if len(data) > MAX_IMAGE_BYTES:
+            print(f"⚠️ Skipped image '{f.filename}': larger than {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+            continue
+        kind = _sniff_image(data)
+        if kind is None:
+            print(f"⚠️ Skipped image '{f.filename}': not a JPEG, PNG or WebP file")
+            continue
+        images.append({
+            "data": data,
+            "ext": kind[0],
+            "mime": kind[1],
+            "name": os.path.basename(f.filename or 'image')[:120],
+        })
+    return images
+
+
+def _upload_hazard_images(hazard_id, images):
+    """Uploads photos to Firebase Storage and returns their metadata for Firestore.
+    Never raises: if storage is down the report is still saved, just without the photos."""
+    stored = []
+    try:
+        bucket = storage.bucket(STORAGE_BUCKET)
+    except Exception as e:
+        print(f"❌ Storage bucket unavailable: {e}")
+        return stored
+
+    for img in images:
+        path = f"hazard-images/{hazard_id}/{uuid.uuid4().hex}.{img['ext']}"
+        try:
+            bucket.blob(path).upload_from_string(img['data'], content_type=img['mime'])
+            stored.append({
+                "path": path,
+                "contentType": img['mime'],
+                "name": img['name'],
+                "size": len(img['data']),
+            })
+        except Exception as e:
+            print(f"❌ Image upload failed for {img['name']}: {e}")
+    return stored
 
 
 def announce_new_hazard(hazard_data):
@@ -81,6 +148,9 @@ def create_hazard():
     if not title or not reporter_uuid:
         return jsonify({"success": False, "message": "title and uuid are required."}), 400
 
+    # Create the document reference up front: the photos are stored under this id.
+    doc_ref = server.db.collection('Hazards').document()
+
     hazard_payload = {
         'title': title,
         'category': category,
@@ -110,11 +180,17 @@ def create_hazard():
             "dispatchStatus": "UNASSIGNED"
         }
 
-    # Optional AI Image Assessment
-    if 'image' in request.files and request.files['image'].filename != '':
-        image_file = request.files['image']
-        temp_file_path = os.path.join(tempfile.gettempdir(), f"hazard_{datetime.now().timestamp()}.jpg")
-        image_file.save(temp_file_path)
+    # Optional photos: AI assessment (first photo) + storage (all photos, up to MAX_HAZARD_IMAGES).
+    # The mobile app keeps sending the form field "image"; sending it several times attaches several photos.
+    uploaded = [f for f in request.files.getlist('image') if f and f.filename]
+    images = _read_hazard_images(uploaded)
+    stored_images = []
+
+    if images:
+        first = images[0]
+        temp_file_path = os.path.join(tempfile.gettempdir(), f"hazard_{uuid.uuid4().hex}.{first['ext']}")
+        with open(temp_file_path, 'wb') as fh:
+            fh.write(first['data'])
 
         try:
             gemini_file = client.files.upload(file=temp_file_path)
@@ -141,8 +217,12 @@ def create_hazard():
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
+        # Keep the photos so admins can see them on the website
+        stored_images = _upload_hazard_images(doc_ref.id, images)
+        if stored_images:
+            hazard_payload['images'] = stored_images
+
     # Save to Firestore
-    doc_ref = server.db.collection('Hazards').document()
     hazard_payload['hazardId'] = doc_ref.id
     doc_ref.set(hazard_payload)
 
@@ -165,7 +245,8 @@ def create_hazard():
         "message": "Community report submitted successfully!",
         "hazardId": doc_ref.id,
         "assignedStation": hazard_payload.get('assignedStation'),
-        "ai_assessment": hazard_payload.get('ai_assessment')
+        "ai_assessment": hazard_payload.get('ai_assessment'),
+        "imagesSaved": len(stored_images)
     }), 201
 
 

@@ -35,20 +35,20 @@ def responder_login():
     
     email = data.get('email')
     password = data.get('password')
-    fcm_token = data.get('fcmToken')  # Extract optional FCM token[cite: 5]
-    duty_status = data.get('duty')    # Extract optional duty status override[cite: 5]
+    fcm_token = data.get('fcmToken')  # Extract optional FCM token
+    duty_status = data.get('duty')    # Extract optional duty status override
 
     if not email or not password:
-        return jsonify({"success": False, "message": "Missing email or password."}), 400[cite: 5]
+        return jsonify({"success": False, "message": "Missing email or password."}), 400
 
     if not api_key:
-        return jsonify({"success": False, "message": "Backend configuration error: Missing API Key."}), 500[cite: 5]
+        return jsonify({"success": False, "message": "Backend configuration error: Missing API Key."}), 500
 
     try:
         if server.db is None:
-            return jsonify({"success": False, "message": "Database client uninitialized."}), 500[cite: 5]
+            return jsonify({"success": False, "message": "Database client uninitialized."}), 500
 
-        # 1. Authenticate credentials via Firebase Auth REST API[cite: 5]
+        # 1. Authenticate credentials via Firebase Auth REST API
         firebase_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
         payload = {
             "email": email,
@@ -63,13 +63,13 @@ def responder_login():
             error_msg = res_data.get('error', {}).get('message', 'Authentication failed')
             if error_msg == "INVALID_LOGIN_CREDENTIALS":
                 error_msg = "Invalid email or password."
-            return jsonify({"success": False, "message": error_msg}), 401[cite: 5]
+            return jsonify({"success": False, "message": error_msg}), 401
 
         uid = res_data.get('localId')
         id_token = res_data.get('idToken')
         refresh_token = res_data.get('refreshToken')
 
-        # 2. Verify responder role in Firestore[cite: 5]
+        # 2. Verify responder role in Firestore
         responder_profile = {}
         responder_ref = server.db.collection('Responders').document(uid)
         responder_doc = responder_ref.get()
@@ -86,12 +86,12 @@ def responder_login():
                     return jsonify({
                         "success": False, 
                         "message": "Access denied. Account is not registered as an emergency responder."
-                    }), 403[cite: 5]
+                    }), 403
             else:
                 return jsonify({
                     "success": False, 
                     "message": "Responder profile not found."
-                }), 404[cite: 5]
+                }), 404
 
         # --- SINGLE-DEVICE SESSION ENFORCEMENT FOR RESPONDERS ---
         old_fcm_token = responder_profile.get('fcmToken')
@@ -111,7 +111,7 @@ def responder_login():
             except Exception as e:
                 print(f"⚠️ Failed to send responder force logout notification: {e}")
 
-        # 3. Register/Update FCM Token, Session ID, and Duty Status in Firestore[cite: 5]
+        # 3. Register/Update FCM Token, Session ID, and Duty Status in Firestore
         update_data = {
             "sessionId": new_session_id
         }
@@ -130,14 +130,14 @@ def responder_login():
 
         responder_ref.set(update_data, merge=True)
 
-        # 4. Retrieve assigned Station information[cite: 5]
+        # 4. Retrieve assigned Station information
         station_info = None
         station_id = responder_profile.get('stationId')
         if station_id:
             station_doc = server.db.collection('Stations').document(station_id).get()
             if station_doc.exists:
                 station_info = station_doc.to_dict()
-                station_info['id'] = station_doc.id[cite: 5]
+                station_info['id'] = station_doc.id
 
         clean_profile = serialize_doc(responder_profile)
         clean_station = serialize_doc(station_info)
@@ -152,7 +152,7 @@ def responder_login():
             "role": clean_profile.get('role', 'responder'),
             "profile": clean_profile,
             "station": clean_station
-        }), 200[cite: 5]
+        }), 200
 
     except Exception as e:
-        return jsonify({"success": False, "message": f"Responder login failed: {str(e)}"}), 500[cite: 5]
+        return jsonify({"success": False, "message": f"Responder login failed: {str(e)}"}), 500
