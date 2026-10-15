@@ -93,6 +93,11 @@ def responder_login():
                     "message": "Responder profile not found."
                 }), 404
 
+        # --- CHECK IF ACCOUNT IS NEW ---
+        # An account is considered new if it explicitly has 'isNew': True, 
+        # or if it has never logged in before (e.g., missing fcmToken or sessionId).
+        is_new_account = responder_profile.get('isNew', False) or not responder_profile.get('fcmToken')
+
         # --- SINGLE-DEVICE SESSION ENFORCEMENT FOR RESPONDERS ---
         old_fcm_token = responder_profile.get('fcmToken')
         new_session_id = str(uuid.uuid4())
@@ -113,7 +118,8 @@ def responder_login():
 
         # 3. Register/Update FCM Token, Session ID, and Duty Status in Firestore
         update_data = {
-            "sessionId": new_session_id
+            "sessionId": new_session_id,
+            "isNew": False  # Once they log in successfully, mark as no longer new
         }
         
         if fcm_token:
@@ -129,6 +135,7 @@ def responder_login():
             responder_profile["duty"] = "on_duty"
 
         responder_ref.set(update_data, merge=True)
+        responder_profile["isNew"] = False
 
         # 4. Retrieve assigned Station information
         station_info = None
@@ -159,6 +166,7 @@ def responder_login():
             "token": id_token,
             "refreshToken": refresh_token,
             "sessionId": new_session_id,
+            "is_new": is_new_account,  # <-- Added flag for frontend onboarding/setup check
             "role": clean_profile.get('role', 'responder'),
             "profile": clean_profile,
             "station": clean_station,

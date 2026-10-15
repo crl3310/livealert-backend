@@ -26,12 +26,6 @@ def get_token():
     latitude = data.get('latitude')
     longitude = data.get('longitude')
     
-    # Capture unitIds or single unitId passed from Postman/client
-    input_unit_ids = data.get('unitIds')
-    input_single_unit = data.get('unitId')
-    if not input_unit_ids and input_single_unit:
-        input_unit_ids = [input_single_unit]
-
     if not channel_name or not reporter_uuid:
         return jsonify({"success": False, "message": "channelName and uuid are required."}), 400
 
@@ -50,14 +44,10 @@ def get_token():
         call_payload = {
             'channelName': channel_name,
             'reporterUuid': reporter_uuid,  
-            'status': 'evaluating',         
+            'status': 'evaluating',        
             'ai_assessment': 'Analyzing emergency video clip...',
             'timestamp': datetime.now(timezone.utc)
         }
-
-        # Save unitIds in the Firestore document if provided
-        if input_unit_ids:
-            call_payload['unitIds'] = input_unit_ids
 
         if latitude is not None and longitude is not None:
             lat_val, lon_val = float(latitude), float(longitude)
@@ -76,8 +66,6 @@ def get_token():
             # Ensure dispatchStatus is PENDING so the listener triggers
             if nearest_station and isinstance(call_payload['assignedStation'], dict):
                 call_payload['assignedStation']['dispatchStatus'] = 'PENDING'
-                if input_unit_ids:
-                    call_payload['assignedStation']['unitIds'] = input_unit_ids
 
         server.db.collection('ActiveCalls').document(channel_name).set(call_payload)
         return jsonify({"success": True, "token": token, "channelName": channel_name, "uid": uid}), 200
@@ -127,7 +115,7 @@ def analyze_video():
         )
         
         response = client.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-3.8-flash',
             contents=[gemini_file, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
