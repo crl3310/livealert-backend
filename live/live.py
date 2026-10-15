@@ -8,6 +8,7 @@ from flask import request, jsonify, Blueprint
 from agora_token_builder import RtcTokenBuilder
 from google import genai
 from google.genai import types
+from firebase_admin import storage
 
 # Relative imports from within the live package directory
 from .schemas import EmergencyAnalysis
@@ -63,7 +64,6 @@ def get_token():
                 "dispatchStatus": "UNASSIGNED"
             }
             
-            # Ensure dispatchStatus is PENDING so the listener triggers
             if nearest_station and isinstance(call_payload['assignedStation'], dict):
                 call_payload['assignedStation']['dispatchStatus'] = 'PENDING'
 
@@ -91,7 +91,7 @@ def analyze_video():
     video_file.save(temp_file_path)
 
     try:
-        # 1. Upload video clip to Gemini API
+        # 1. Upload video clip to Gemini API for assessment
         gemini_file = client.files.upload(file=temp_file_path)
         while gemini_file.state.name == "PROCESSING":
             time.sleep(1)
@@ -100,18 +100,17 @@ def analyze_video():
         if gemini_file.state.name == "FAILED":
             raise Exception("Gemini video processing failed.")
 
-        # 2. Detailed prompt instructing Gemini on screen detection, audio inspection, and classification
+        # Permissive prompt allowing screen recordings while evaluating emergency context
         prompt = (
-            "Analyze the following video and audio clip captured by a citizen in real-time.\n\n"
-            "VISUAL INSPECTION:\n"
-            "1. Check if the camera is recording a secondary screen (e.g., laptop display, mobile screen, TV, monitor, glare, moiré patterns, or bezels). "
-            "If the footage is recorded off a screen, flag is_screen_recording as true and is_fake as true.\n"
-            "2. Look for real, live physical hazards or incidents occurring in the physical environment.\n\n"
-            "AUDIO INSPECTION:\n"
-            "1. Listen closely to the audio track for real ambient sounds of distress (screams, arguments, crash impacts, gunshots, glass breaking, sirens).\n\n"
+            "Analyze the following video and audio clip captured in real-time. "
+            "Note that the video may be recorded off a secondary screen (such as a laptop monitor, phone display, or television broadcast) showing an emergency or incident. "
+            "Do NOT reject footage simply because it is displayed on a screen or monitor.\n\n"
+            "VISUAL & AUDIO INSPECTION:\n"
+            "1. Evaluate the content being displayed or recorded for any valid emergency, threat, or hazard (e.g., fire, accidents, crimes, medical distress, security issues).\n"
+            "2. Listen to the audio track for any signs of distress, alarms, or emergency context.\n\n"
             "FLAGGING RULE:\n"
-            "If the clip shows screen playback, a prank, staged acting, or no real active emergency visual/audio, "
-            "flag is_fake as true and is_emergency as false."
+            "Only flag is_fake as true if the content is entirely non-emergency, a clear joke/prank, or completely irrelevant. "
+            "If it depicts a real emergency scenario (even if shown via a screen or device), evaluate it as a valid emergency."
         )
         
         response = client.models.generate_content(
@@ -125,27 +124,22 @@ def analyze_video():
 
         analysis_data = json.loads(response.text)
 
-        # 3. Check if the report is fake, recorded off a screen, or non-emergency
         is_fake = (
             analysis_data.get('is_fake', False) 
             or not analysis_data.get('is_emergency', True)
-            or analysis_data.get('is_screen_recording', False)
         )
 
         if is_fake:
-            # HALT DISPATCH: Update Firestore status to rejected/fake
             update_payload = {
                 'status': 'cancelled_fake',
                 'incidentType': analysis_data.get('incident_type', 'Fake/Non-Emergency'),
                 'threatLevel': 'NONE',
-                'ai_assessment': f"REJECTED: {analysis_data.get('summary', 'Fake, screen recording, or non-emergency report detected.')}",
+                'ai_assessment': f"REJECTED: {analysis_data.get('summary', 'Non-emergency report detected.')}",
                 'analyzed_at': datetime.now(timezone.utc),
                 'assignedStation.dispatchStatus': 'REJECTED'
             }
-            
             server.db.collection('ActiveCalls').document(channel_name).update(update_payload)
             
-            # Cleanup temp resources
             client.files.delete(name=gemini_file.name)
             if os.path.exists(temp_file_path): 
                 os.remove(temp_file_path)
@@ -153,11 +147,11 @@ def analyze_video():
             return jsonify({
                 "success": False, 
                 "is_fake": True,
-                "message": "Report rejected. AI detected fake content, screen playback, or non-emergency situation.",
+                "message": "Report rejected. AI detected a non-emergency situation.",
                 "assessment": analysis_data
             }), 200
 
-        # 4. VALID EMERGENCY: Mark as 'incoming' to trigger dispatch
+        # VALID EMERGENCY: Mark as 'incoming'
         update_payload = {
             'status': 'incoming',  
             'incidentType': analysis_data.get('incident_type', 'General Emergency'),
@@ -192,4 +186,81 @@ def analyze_video():
             os.remove(temp_file_path)
         return jsonify({"success": False, "message": f"Analysis failed: {str(e)}"}), 500
 
+
+@live_bp.route('/upload-evidence', methods=['POST'])
+def upload_evidence():
+    import server
+    channel_name = request.form.get('channelName')
+    reporter_uuid = request.form.get('reporterUuid')
+
+    if not channel_name or not reporter_uuid or 'video' not in request.files:
+        return jsonify({"success": False, "message": "Missing channelName, reporterUuid, or video file."}), 400
+
+    video_file = request.files['video']
+    if server.db is None:
+        return jsonify({"success": False, "message": "Database client uninitialized."}), 500
+
+    # 1. Pre-check: Ensure the ActiveCall document exists and matches the reporter UUID
+    call_ref = server.db.collection('ActiveCalls').document(channel_name)
+    call_doc = call_ref.get()
+    
+    if not call_doc.exists:
+        return jsonify({"success": False, "message": f"Active call '{channel_name}' not found."}), 404
+
+    call_data = call_doc.to_dict() or {}
+    stored_reporter_uuid = call_data.get('reporterUuid')
+
+    if stored_reporter_uuid and stored_reporter_uuid != reporter_uuid:
+        return jsonify({"success": False, "message": "Unauthorized: reporterUuid does not match this call."}), 403
+
+    temp_file_path = os.path.join(tempfile.gettempdir(), f"evidence_{channel_name}.mp4")
+    video_file.save(temp_file_path)
+
+    blob = None
+    try:
+        bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
+        if not bucket_name:
+            raise Exception("FIREBASE_STORAGE_BUCKET environment variable is missing.")
+
+        bucket = storage.bucket(bucket_name)
+        blob_path = f"evidence_videos/{channel_name}.mp4"
+        blob = bucket.blob(blob_path)
+        
+        # Upload explicitly as video/mp4 for Android compatibility
+        blob.upload_from_filename(temp_file_path, content_type='video/mp4')
+        blob.make_public()
+        evidence_url = blob.public_url
+
+        # Save reference URL to the ActiveCalls document in Firestore
+        call_ref.update({
+            'evidenceUrl': evidence_url,
+            'evidence_uploaded_at': datetime.now(timezone.utc)
+        })
+
+        # Cleanup local temp file
+        if os.path.exists(temp_file_path): 
+            os.remove(temp_file_path)
+
+        return jsonify({
+            "success": True,
+            "message": "MP4 evidence video uploaded and linked successfully.",
+            "evidenceUrl": evidence_url
+        }), 200
+
+    except Exception as e:
+        # Cleanup local temp file
+        if os.path.exists(temp_file_path): 
+            os.remove(temp_file_path)
+            
+        # ROLLBACK: Delete the uploaded blob if an error occurred during the process
+        if blob is not None:
+            try:
+                if blob.exists():
+                    blob.delete()
+                    print(f"🗑️ Rolled back: Deleted orphaned blob {blob.name} due to error.")
+            except Exception as cleanup_err:
+                print(f"⚠️ Failed to cleanup orphaned blob: {cleanup_err}")
+
+        return jsonify({"success": False, "message": f"Evidence upload failed: {str(e)}"}), 500
+        
 from . import routes
