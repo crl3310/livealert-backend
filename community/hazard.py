@@ -263,6 +263,7 @@ def get_hazards():
         hazards_list = []
         
         manila_tz = timezone(timedelta(hours=8))
+        bucket = storage.bucket(STORAGE_BUCKET)
 
         for doc in hazards_ref:
             hazard_data = doc.to_dict()
@@ -273,16 +274,39 @@ def get_hazards():
             else:
                 formatted_time = "Just now"
 
+            # Format resolvedAt timestamp if present
+            resolved_at_raw = hazard_data.get('resolvedAt')
+            formatted_resolved_time = None
+            if isinstance(resolved_at_raw, datetime):
+                formatted_resolved_time = resolved_at_raw.astimezone(manila_tz).strftime('%B %d, %Y at %I:%M %p')
+            else:
+                formatted_resolved_time = str(resolved_at_raw) if resolved_at_raw else None
+
+            # Generate a temporary downloadable HTTP URL for the first image if it exists
+            image_url = None
+            images_list = hazard_data.get('images', [])
+            if images_list:
+                img_path = images_list[0].get('path')
+                if img_path:
+                    try:
+                        blob = bucket.blob(img_path)
+                        image_url = blob.generate_signed_url(expiration=timedelta(days=7))
+                    except Exception as e:
+                        print(f"❌ Error generating signed URL for {img_path}: {e}")
+
             hazards_list.append({
                 "id": doc.id,
                 "title": hazard_data.get('title'),
                 "category": hazard_data.get('category'),
-                "description": hazard_data.get('description', ''), # <-- ADD THIS LINE
+                "description": hazard_data.get('description', ''),
                 "status": hazard_data.get('status', 'REPORTED'),
                 "locationName": hazard_data.get('location', {}).get('address', 'Unknown Area'),
                 "time": formatted_time,
+                "imageUrl": image_url,
                 "assignedStation": hazard_data.get('assignedStation'),
-                "ai_assessment": hazard_data.get('ai_assessment')
+                "ai_assessment": hazard_data.get('ai_assessment'),
+                "resolvedAt": formatted_resolved_time, # 👈 Added
+                "resolution": hazard_data.get('resolution')    # 👈 Added
             })
 
         return jsonify({

@@ -139,8 +139,18 @@ def responder_login():
                 station_info = station_doc.to_dict()
                 station_info['id'] = station_doc.id
 
+        # 5. Retrieve assigned Unit information
+        unit_info = None
+        unit_id = responder_profile.get('unitId') or uid
+        if unit_id:
+            unit_doc = server.db.collection('Units').document(unit_id).get()
+            if unit_doc.exists:
+                unit_info = unit_doc.to_dict()
+                unit_info['id'] = unit_doc.id
+
         clean_profile = serialize_doc(responder_profile)
         clean_station = serialize_doc(station_info)
+        clean_unit = serialize_doc(unit_info)
 
         return jsonify({
             "success": True,
@@ -151,7 +161,8 @@ def responder_login():
             "sessionId": new_session_id,
             "role": clean_profile.get('role', 'responder'),
             "profile": clean_profile,
-            "station": clean_station
+            "station": clean_station,
+            "unit": clean_unit
         }), 200
 
     except Exception as e:
