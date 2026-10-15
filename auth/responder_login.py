@@ -166,7 +166,7 @@ def responder_login():
             "token": id_token,
             "refreshToken": refresh_token,
             "sessionId": new_session_id,
-            "is_new": is_new_account,  # <-- Added flag for frontend onboarding/setup check
+            "is_new": clean_profile.get('is_new', False),  # <-- Added flag for frontend onboarding/setup check
             "role": clean_profile.get('role', 'responder'),
             "profile": clean_profile,
             "station": clean_station,
