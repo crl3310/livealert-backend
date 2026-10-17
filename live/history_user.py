@@ -1,8 +1,21 @@
 from flask import Blueprint, jsonify
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud import firestore
+from datetime import timedelta
+from firebase_admin import storage
+
+STORAGE_BUCKET = "livealert-d12cc.firebasestorage.app"
 
 history_user_bp = Blueprint('history_user_bp', __name__)
+
+def _signed_image_url(path):
+    """Temporary link the app can load, since the Storage files are private."""
+    try:
+        blob = storage.bucket(STORAGE_BUCKET).blob(path)
+        return blob.generate_signed_url(version="v4", expiration=timedelta(hours=1), method="GET")
+    except Exception as e:
+        print(f"Could not sign image URL for {path}: {e}")
+        return None
 
 def sanitize_firestore_data(data):
     """Recursively converts Firestore timestamps, GeoPoints, and special types into JSON-serializable formats."""
@@ -69,6 +82,8 @@ def get_user_call_history(uuid):
 
         for doc in hazards_query.stream():
             data = doc.to_dict()
+            if str(data.get('status', '')).lower() != 'resolved':
+                continue
             data['history_type'] = 'hazard'
             data['id'] = doc.id
             combined_history.append(sanitize_firestore_data(data))
@@ -90,6 +105,13 @@ def get_user_call_history(uuid):
         end_idx = start_idx + per_page
         
         paginated_history = combined_history[start_idx:end_idx]
+
+        # Attach a temporary photo link to the hazards on this page only
+        for item in paginated_history:
+            if item.get('history_type') == 'hazard':
+                images = item.get('images') or []
+                first_path = images[0].get('path') if images and isinstance(images[0], dict) else None
+                item['imageUrl'] = _signed_image_url(first_path) if first_path else None
 
         return jsonify({
             "success": True,
