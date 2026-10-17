@@ -49,6 +49,7 @@ from live.live import live_bp
 from community.hazard import community_bp
 from responder.duty import responder_bp
 from responder.history_unit import responder_history_bp
+from live.history_user import get_user_call_history 
 
 
 app.register_blueprint(community_bp, url_prefix='/api/community')
@@ -58,6 +59,7 @@ app.register_blueprint(responder_bp, url_prefix='/api/responder')
 app.register_blueprint(responder.location.responder_bp, url_prefix='/api/responder')
 app.register_blueprint(history_user_bp, url_prefix='/api/live')
 app.register_blueprint(responder_history_bp, url_prefix='/api/responder')
+
 
 @app.route('/', methods=['GET'])
 def gateway_status():
