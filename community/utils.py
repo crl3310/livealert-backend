@@ -29,14 +29,13 @@ def get_readable_address(latitude, longitude):
 
 def find_nearest_police_station(user_lat, user_lon):
     """Queries the 'Stations' collection and evaluates the geographically closest asset."""
-    import server
-    if server.db is None:
-        return None
+    from app_core import get_db
+    db = get_db()
 
     try:
         user_lat = float(user_lat)
         user_lon = float(user_lon)
-        stations_ref = server.db.collection('Stations')
+        stations_ref = db.collection('Stations')
         docs = stations_ref.stream()
 
         closest_station = None

@@ -1,83 +1,71 @@
+import logging
 import os
+
 import requests
-from flask import request, jsonify
+from flask import g, jsonify, request
+
+from app_core import get_db
+from app_security import (MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, error, firebase_sign_in, get_profile,
+                          limiter, require_auth)
 from .register import auth_bp
 
+log = logging.getLogger(__name__)
+
+
 @auth_bp.route('/responder/change-password', methods=['POST'])
+@limiter.limit("5 per minute; 20 per hour")
+@require_auth
 def change_password():
-    import server  # Access live Firestore db instance
-
-    api_key = os.getenv("FIREBASE_WEB_API_KEY")
-    data = request.get_json() or {}
-
-    email = data.get('email')
+    """Requires a valid login token. The account is taken from the token, not from the body."""
+    data = request.get_json(silent=True) or {}
     old_password = data.get('old_password')
     new_password = data.get('new_password')
 
-    if not email or not old_password or not new_password:
-        return jsonify({
-            "success": False, 
-            "message": "Missing email, old password, or new password."
-        }), 400
+    email = (g.claims.get('email') or '').lower()
+    body_email = str(data.get('email') or '').strip().lower()
+    if body_email and body_email != email:
+        return error("Email does not match the signed-in account.", 403)
 
-    if len(new_password) < 6:
-        return jsonify({
-            "success": False, 
-            "message": "New password must be at least 6 characters long."
-        }), 400
+    if not email or not isinstance(old_password, str) or not isinstance(new_password, str) \
+            or not old_password or not new_password:
+        return error("Missing old password or new password.", 400)
+
+    if not (MIN_PASSWORD_LEN <= len(new_password) <= MAX_PASSWORD_LEN):
+        return error(f"New password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters long.", 400)
 
     try:
-        # 1. Re-authenticate user with current password to get ID token
-        auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
-        auth_payload = {
-            "email": email,
-            "password": old_password,
-            "returnSecureToken": True
-        }
+        # 1. Re-authenticate with the current password
+        auth_data, fail = firebase_sign_in(email, old_password)
+        if fail:
+            status = fail[1] if fail[1] in (429, 503) else 401
+            msg = "Invalid current password." if status == 401 else fail[0]
+            return error(msg, status)
 
-        auth_res = requests.post(auth_url, json=auth_payload)
-        auth_data = auth_res.json()
-
-        if auth_res.status_code != 200:
-            return jsonify({
-                "success": False, 
-                "message": "Invalid current password or email."
-            }), 401
-
-        uid = auth_data.get('localId')
-        id_token = auth_data.get('idToken')
-
-        # 2. Update password in Firebase Auth REST API
-        update_url = f"https://identitytoolkit.googleapis.com/v1/accounts:update?key={api_key}"
-        update_payload = {
-            "idToken": id_token,
-            "password": new_password,
-            "returnSecureToken": True
-        }
-
-        update_res = requests.post(update_url, json=update_payload)
+        # 2. Update password via Firebase Auth REST API
+        api_key = os.getenv("FIREBASE_WEB_API_KEY")
+        update_res = requests.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:update?key={api_key}",
+            json={"idToken": auth_data.get('idToken'), "password": new_password, "returnSecureToken": True},
+            timeout=10,
+        )
         if update_res.status_code != 200:
-            return jsonify({
-                "success": False, 
-                "message": "Failed to update password in Firebase Auth."
-            }), 500
+            log.error("Firebase password update failed: %s", update_res.text[:300])
+            return error("Failed to update password.", 500)
+        new_tokens = update_res.json()
 
-        # 3. Update is_new to false in Firestore (Responders or Users)
-        responder_ref = server.db.collection('Responders').document(uid)
-        if responder_ref.get().exists:
-            responder_ref.update({"is_new": False})
-        else:
-            user_ref = server.db.collection('Users').document(uid)
-            if user_ref.get().exists:
-                user_ref.update({"is_new": False})
+        # 3. is_new -> False in whichever collection holds this profile
+        coll, _ = get_profile()
+        if coll:
+            get_db().collection(coll).document(g.uid).set({"is_new": False}, merge=True)
 
         return jsonify({
             "success": True,
-            "message": "Password updated successfully. is_new status set to false."
+            "message": "Password updated successfully. is_new status set to false.",
+            # Old refresh tokens are invalidated by a password change; hand the app fresh ones.
+            "token": new_tokens.get('idToken'),
+            "refreshToken": new_tokens.get('refreshToken'),
         }), 200
 
-    except Exception as e:
-        return jsonify({
-            "success": False, 
-            "message": f"Change password failed: {str(e)}"
-        }), 500
+    except Exception:
+        log.exception("Change password failed")
+        return error("Change password failed. Please try again.", 500)

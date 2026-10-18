@@ -53,12 +53,11 @@ def get_stations_with_on_duty_responders():
     who is not off duty. A station with 2 admins where 1 is off_duty/offline
     still qualifies as long as the other isn't off_duty.
     """
-    import server
+    from app_core import get_db
+    db = get_db()
     available = set()
-    if server.db is None:
-        return available
 
-    for doc in server.db.collection(RESPONDER_COLLECTION).stream():
+    for doc in db.collection(RESPONDER_COLLECTION).stream():
         data = doc.to_dict() or {}
         role = str(data.get(RESPONDER_ROLE_FIELD) or '').strip().lower()
         if role not in CALL_RECEIVING_ROLES:
@@ -78,9 +77,8 @@ def find_nearest_police_station(user_lat, user_lon):
     responder. Stations with nobody on duty are skipped, so the next nearest
     eligible station is chosen. Returns None if no station is available.
     """
-    import server
-    if server.db is None:
-        return None
+    from app_core import get_db
+    db = get_db()
 
     try:
         user_lat = float(user_lat)
@@ -93,7 +91,7 @@ def find_nearest_police_station(user_lat, user_lon):
 
         candidates = []
 
-        for doc in server.db.collection('Stations').stream():
+        for doc in db.collection('Stations').stream():
             # Skip stations with no on-duty responder
             if doc.id.strip().upper() not in on_duty_stations:
                 continue

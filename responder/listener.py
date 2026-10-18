@@ -1,4 +1,5 @@
 import threading
+import logging
 import json
 from firebase_admin import messaging, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -6,7 +7,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 # Tracks initial startup load to prevent historical docs from triggering notifications
 _initial_snapshot_complete = False
 
-def on_active_calls_snapshot(col_snapshot, changes, read_time):
+def _process_snapshot(col_snapshot, changes, read_time):
     """
     Callback executed when ActiveCalls documents are created or modified.
     """
@@ -72,9 +73,8 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
     """
     Queries responders by their 'unitId' field, then sends FCM push notifications.
     """
-    import server
-    if server.db is None:
-        return
+    from app_core import get_db
+    db = get_db()
 
     try:
         fcm_tokens = []
@@ -82,7 +82,7 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
         # Query responders where the 'unitId' field matches the assigned unit ID
         if unit_ids:
             for target_unit_id in unit_ids:
-                query = server.db.collection('Responders') \
+                query = db.collection('Responders') \
                     .where(filter=FieldFilter('unitId', '==', target_unit_id))
                 
                 responders = query.stream()
@@ -95,7 +95,7 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
                             print(f"✅ Found FCM token for unit '{target_unit_id}'")
         else:
             # Fallback: query all on-duty responders for the station if no specific unit IDs
-            query = server.db.collection('Responders') \
+            query = db.collection('Responders') \
                 .where(filter=FieldFilter('stationId', '==', station_id)) \
                 .where(filter=FieldFilter('duty', '==', 'on_duty'))
             
@@ -132,7 +132,7 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
         print(f"📢 Notification successfully sent to {response.success_count} devices across assigned units.")
 
         # Mark document as notified in Firestore ONLY after successful notification
-        server.db.collection('ActiveCalls').document(call_id).update({'notificationSent': True})
+        db.collection('ActiveCalls').document(call_id).update({'notificationSent': True})
 
     except Exception as e:
         print(f"❌ Failed to send FCM push notification: {str(e)}")
@@ -141,9 +141,8 @@ def send_live_termination_push(call_id, call_data):
     """
     Gathers tokens for assigned units and citizen, then broadcasts an end-live push message.
     """
-    import server
-    if server.db is None:
-        return
+    from app_core import get_db
+    db = get_db()
 
     try:
         fcm_tokens = []
@@ -156,7 +155,7 @@ def send_live_termination_push(call_id, call_data):
 
         if unit_ids:
             for unit_id in unit_ids:
-                query = server.db.collection('Responders') \
+                query = db.collection('Responders') \
                     .where(filter=FieldFilter('unitId', '==', unit_id))
                 for doc in query.stream():
                     token = doc.to_dict().get('fcmToken')
@@ -166,7 +165,7 @@ def send_live_termination_push(call_id, call_data):
         # 2. Gather citizen token using reporterUuid (Lookup in Users collection)
         reporter_uuid = call_data.get('reporterUuid')
         if reporter_uuid:
-            user_doc = server.db.collection('Users').document(reporter_uuid).get()
+            user_doc = db.collection('Users').document(reporter_uuid).get()
             if user_doc.exists:
                 citizen_token = user_doc.to_dict().get('fcmToken')
                 if citizen_token:
@@ -179,7 +178,7 @@ def send_live_termination_push(call_id, call_data):
 
         if not fcm_tokens:
             print(f"ℹ️ No active FCM tokens found to terminate call '{call_id}'.")
-            server.db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
+            db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
             return
 
         # Broadcast termination message to units and citizen simultaneously
@@ -200,7 +199,7 @@ def send_live_termination_push(call_id, call_data):
         print(f"🛑 Termination notice sent to {response.success_count} devices (Units + Citizen).")
 
         # Mark that the termination notification has been handled
-        server.db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
+        db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
 
     except Exception as e:
         print(f"❌ Failed to send live termination push: {str(e)}")
@@ -209,12 +208,20 @@ def start_active_calls_listener():
     """
     Starts listening to ActiveCalls in a background thread without blocking Flask.
     """
-    import server
-    if server.db:
+    from app_core import get_db
+    db = get_db()
+    if db:
         try:
-            calls_ref = server.db.collection('ActiveCalls')
+            calls_ref = db.collection('ActiveCalls')
             # Attach on_snapshot listener
             calls_ref.on_snapshot(on_active_calls_snapshot)
             print("📡 Real-time Firestore listener successfully initialized on 'ActiveCalls'.")
         except Exception as e:
             print(f"❌ Listener initialization failed: {str(e)}")
+
+def on_active_calls_snapshot(col_snapshot, changes, read_time):
+    """Wrapper so one bad document can never kill the listener thread."""
+    try:
+        _process_snapshot(col_snapshot, changes, read_time)
+    except Exception:
+        logging.getLogger(__name__).exception("ActiveCalls snapshot handler failed")

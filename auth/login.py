@@ -1,110 +1,90 @@
-import os
+import logging
 import uuid
-import requests
-from flask import request, jsonify
+
 from firebase_admin import messaging
+from flask import jsonify, request
+
+from app_core import get_db
+from app_security import error, firebase_sign_in, limiter, normalize_email
 from .register import auth_bp
 
+log = logging.getLogger(__name__)
+
+
 @auth_bp.route('/login', methods=['POST'])
+@limiter.limit("10 per minute; 100 per hour")
 def login():
-    import server  # Grab our live Firestore db connection
-    
-    # Securely read the Web API key straight from your .env file
-    api_key = os.getenv("FIREBASE_WEB_API_KEY")
-    
-    data = request.get_json() or {}
-    email = data.get('email')
+    data = request.get_json(silent=True) or {}
+    email = normalize_email(data.get('email'))
     password = data.get('password')
     fcm_token = data.get('fcmToken')  # Incoming device FCM token
-    
-    if not email or not password:
-        return jsonify({"success": False, "message": "Missing credentials"}), 400
-        
-    if not api_key:
-        return jsonify({"success": False, "message": "Backend configuration error: Missing API Key."}), 500
-        
+
+    if not email or not isinstance(password, str) or not password:
+        return error("Missing credentials", 400)
+    if fcm_token is not None and (not isinstance(fcm_token, str) or len(fcm_token) > 4096):
+        return error("Invalid fcmToken.", 400)
+
     try:
-        if server.db is None:
-            return jsonify({"success": False, "message": "Database client uninitialized."}), 500
+        db = get_db()
 
-        # --- SECURITY CHECK: Force Verification Doc Check during Login ---
-        verify_doc = server.db.collection('VerificationCodes').document(email).get()
-        if not verify_doc.exists or not verify_doc.to_dict().get('verified', False):
-            return jsonify({
-                "success": False, 
-                "message": "Email address not verified. Please verify your 6-digit code first.",
-                "requiresVerification": True
-            }), 403
-
-        # 1. Hit Firebase's official REST API to verify credentials
-        firebase_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
-        payload = {
-            "email": email,
-            "password": password,
-            "returnSecureToken": True
-        }
-        
-        response = requests.post(firebase_url, json=payload)
-        res_data = response.json()
-        
-        # 2. Check if authentication failed
-        if response.status_code != 200:
-            error_msg = res_data.get('error', {}).get('message', 'Authentication failed')
-            if error_msg == "INVALID_LOGIN_CREDENTIALS":
-                error_msg = "Invalid email or password."
-            return jsonify({"success": False, "message": error_msg}), 401
+        # 1. Verify the password first, so we never reveal whether an email is registered/verified.
+        res_data, fail = firebase_sign_in(email, password)
+        if fail:
+            return error(fail[0], fail[1])
 
         uid = res_data.get('localId')
         id_token = res_data.get('idToken')
-        
-        user_ref = server.db.collection('Users').document(uid)
+        refresh_token = res_data.get('refreshToken')
+
+        user_ref = db.collection('Users').document(uid)
         user_doc = user_ref.get()
-        
-        # --- SINGLE-DEVICE SESSION ENFORCEMENT ---
-        old_fcm_token = None
-        if user_doc.exists:
-            old_fcm_token = user_doc.to_dict().get('fcmToken')
-            
+        user_profile = user_doc.to_dict() if user_doc.exists else {}
+
+        # 2. Email must be verified. Profile flag first; legacy VerificationCodes doc as fallback.
+        verified = bool(user_profile.get('isVerified'))
+        if not verified:
+            legacy = db.collection('VerificationCodes').document(email).get()
+            verified = legacy.exists and bool((legacy.to_dict() or {}).get('verified'))
+        if not verified:
+            return error("Email address not verified. Please verify your 6-digit code first.", 403,
+                         requiresVerification=True)
+
+        # 3. Single-device session enforcement
+        old_fcm_token = user_profile.get('fcmToken')
         new_session_id = str(uuid.uuid4())
-        
-        # If logged in elsewhere with a different token, notify the old device to logout
+
         if old_fcm_token and fcm_token and old_fcm_token != fcm_token:
             try:
-                logout_message = messaging.Message(
+                messaging.send(messaging.Message(
                     token=old_fcm_token,
-                    data={
-                        "type": "FORCE_LOGOUT",
-                        "message": "Your account was logged in from another device."
-                    }
-                )
-                messaging.send(logout_message)
-                print(f"🔒 Sent FORCE_LOGOUT push to previous device for user {uid}")
-            except Exception as e:
-                print(f"⚠️ Failed to send force logout notification: {e}")
+                    data={"type": "FORCE_LOGOUT", "message": "Your account was logged in from another device."},
+                ))
+                log.info("Sent FORCE_LOGOUT push to previous device for user %s", uid)
+            except Exception:
+                log.exception("Failed to send force logout notification")
 
-        # Save new session data and token in Firestore
+        # Always rotate the session id (previously only saved when an FCM token was sent).
+        session_update = {'sessionId': new_session_id}
         if fcm_token:
-            user_ref.set({
-                'fcmToken': fcm_token,
-                'sessionId': new_session_id
-            }, merge=True)
-            print(f"📱 Updated FCM token and session for user {uid}")
+            session_update['fcmToken'] = fcm_token
+        user_ref.set(session_update, merge=True)
 
-        # 3. Fetch user profile data from Firestore 'Users' collection
-        user_profile = {}
-        if user_doc.exists:
-            user_profile = user_doc.to_dict()
-            if 'birthdate' in user_profile and user_profile['birthdate']:
-                user_profile['birthdate'] = user_profile['birthdate'].strftime('%Y-%m-%d')
-        
+        # 4. Profile for the app
+        user_profile.update(session_update)
+        bd = user_profile.get('birthdate')
+        if bd is not None and hasattr(bd, 'strftime'):
+            user_profile['birthdate'] = bd.strftime('%Y-%m-%d')
+
         return jsonify({
             "success": True,
             "message": "Login successful!",
             "uid": uid,
             "token": id_token,
+            "refreshToken": refresh_token,   # NEW: lets the app renew the 1-hour ID token
             "sessionId": new_session_id,
             "profile": user_profile
         }), 200
-        
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+
+    except Exception:
+        log.exception("Login failed")
+        return error("Login failed. Please try again.", 500)

@@ -1,31 +1,40 @@
+import logging
+from datetime import timedelta
+
+from flask import jsonify
+
+from app_core import get_db, signed_url
+from app_security import caller_can_view_call, error, require_auth, valid_channel
 from .live import live_bp
-from flask import Blueprint, request, jsonify
 
-# Inside your live or citizen blueprint file
+log = logging.getLogger(__name__)
+
+
+def _load_visible_call(channel_name):
+    """(call_dict, None) if it exists AND the caller may see it, else (None, error_response).
+    Unauthorised callers get 404, so call ids can't be probed."""
+    if not valid_channel(channel_name):
+        return None, error("Emergency call record not found.", 404)
+    doc = get_db().collection('ActiveCalls').document(channel_name).get()
+    if not doc.exists:
+        return None, error("Emergency call record not found.", 404)
+    call = doc.to_dict() or {}
+    if not caller_can_view_call(call):
+        return None, error("Emergency call record not found.", 404)
+    return call, None
+
+
 @live_bp.route('/track-emergency/<channel_name>', methods=['GET'])
+@require_auth
 def track_emergency(channel_name):
-    import server
-
-    if server.db is None:
-        return jsonify({"success": False, "message": "Database client uninitialized."}), 500
-
     try:
-        doc_ref = server.db.collection('ActiveCalls').document(channel_name).get()
+        call_data, err = _load_visible_call(channel_name)
+        if err:
+            return err
 
-        if not doc_ref.exists:
-            return jsonify({"success": False, "message": "Emergency call record not found."}), 404
-
-        call_data = doc_ref.to_dict()
-
-        # 1. Extract citizen's stationary location
         user_location = call_data.get('location', {})
-
-        # 2. Extract responding units locations map
-        responder_locations_map = call_data.get('responderLocations', {})
-
-        # Format responder locations into a clean list for the mobile app UI
         units_tracking = []
-        for unit_id, loc_info in responder_locations_map.items():
+        for unit_id, loc_info in (call_data.get('responderLocations') or {}).items():
             units_tracking.append({
                 "unitId": unit_id,
                 "latitude": loc_info.get('latitude'),
@@ -46,5 +55,26 @@ def track_emergency(channel_name):
             "assignedUnits": units_tracking
         }), 200
 
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Failed to retrieve tracking data: {str(e)}"}), 500
+    except Exception:
+        log.exception("Failed to retrieve tracking data")
+        return error("Failed to retrieve tracking data.", 500)
+
+
+@live_bp.route('/evidence/<channel_name>', methods=['GET'])
+@require_auth
+def get_evidence_url(channel_name):
+    """NEW: fresh 1-hour link to the (private) evidence video for the reporter or an authorised responder."""
+    try:
+        call_data, err = _load_visible_call(channel_name)
+        if err:
+            return err
+        path = call_data.get('evidencePath')
+        if not path:
+            return error("No evidence has been uploaded for this call.", 404)
+        url = signed_url(path, timedelta(hours=1))
+        if not url:
+            return error("Could not generate the evidence link.", 500)
+        return jsonify({"success": True, "evidenceUrl": url, "expiresInSeconds": 3600}), 200
+    except Exception:
+        log.exception("Evidence link failed")
+        return error("Could not generate the evidence link.", 500)

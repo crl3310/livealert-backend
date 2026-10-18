@@ -1,3 +1,4 @@
+import logging
 from firebase_admin import messaging
 
 def setup_active_calls_listener(db):
@@ -5,7 +6,7 @@ def setup_active_calls_listener(db):
     Sets up a real-time snapshot listener on the ActiveCalls collection.
     Runs continuously in the background to watch for status changes.
     """
-    def callback(col_snapshot, changes, read_time):
+    def _callback(col_snapshot, changes, read_time):
         for change in changes:
             call_data = change.document.to_dict()
             call_id = change.document.id
@@ -57,4 +58,10 @@ def setup_active_calls_listener(db):
                         print(f"❌ Failed to send en-route push: {e}")
 
     # Attach the listener to your Firestore ActiveCalls collection
+    def callback(col_snapshot, changes, read_time):
+        try:
+            _callback(col_snapshot, changes, read_time)
+        except Exception:
+            logging.getLogger(__name__).exception('en-route listener failed')
+
     db.collection('ActiveCalls').on_snapshot(callback)
