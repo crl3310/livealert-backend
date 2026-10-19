@@ -59,6 +59,7 @@ import auth.login
 import auth.verify
 import auth.responder_login
 import auth.responder_changepass
+import auth.refresh
 import responder.location
 from live.history_user import history_user_bp
 from live.live import live_bp
