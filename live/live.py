@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -28,14 +29,16 @@ GEMINI_PROCESSING_TIMEOUT_SEC = 60
 
 AI_MAX_ATTEMPTS = int(os.getenv("AI_MAX_ATTEMPTS", "2"))  # retries are cheap now that nobody is waiting on them
 AI_WORKERS = int(os.getenv("AI_WORKERS", "6"))            # max simultaneous Gemini analyses
+CLIP_GRACE_SEC = int(os.getenv("CLIP_GRACE_SEC", "120"))  # live call with no verification clip after this long -> manual review
 
 DEFAULT_THREAT_LEVEL = 2  # provisional level shown until the AI replies (also used if the AI returns junk)
 NO_THREAT_LEVEL = 0       # used for rejected/fake reports
 
-# Written to the existing fields while the AI is still working. A call with no `analyzed_at` yet is still pending.
+# Written to the existing fields while the AI is still working. A call with no analyzed_at yet is still pending.
 PENDING_INCIDENT_TYPE = "Pending AI Analysis"
 PENDING_ASSESSMENT = "AI analysis in progress."
 FAILED_ASSESSMENT = "Automatic AI analysis was unavailable; this report needs manual review."
+NO_CLIP_ASSESSMENT = "No verification clip was received; this report needs manual review."
 
 # Background pool: caps concurrent Gemini calls and keeps them off the gunicorn request threads.
 _executor = ThreadPoolExecutor(max_workers=AI_WORKERS, thread_name_prefix="ai-analysis")
@@ -102,11 +105,11 @@ def analyze_video(video_path, mode):
 
 
 # ---------------------------------------------------------------------------
-# Background work. Nothing below may touch flask's `request` / `g`: it runs on pool threads,
+# Background work. Nothing below may touch flask's request / g: it runs on pool threads,
 # so everything it needs is passed in as plain arguments.
 # ---------------------------------------------------------------------------
 def _update_if_current(call_ref, call_ts, fields):
-    """Applies `fields` to the call only if it is still the same call (same creation `timestamp`).
+    """Applies fields to the call only if it is still the same call (same creation timestamp).
     If the reporter restarted the same channel in the meantime, a late result must not touch the new call."""
 
     @firestore.transactional
@@ -155,7 +158,7 @@ def _apply_analysis(call_ref, call_ts, analysis):
             return 'superseded'
 
         status = str(call.get('status') or '').lower()
-        update = {'analyzed_at': now}
+        update = {'analyzed_at': now, 'aiUnavailable': False}
 
         if not is_fake:
             update.update({
@@ -225,9 +228,49 @@ def _fill_address(channel_name, call_ts, lat, lon):
         log.exception("Address lookup failed for %s", channel_name)
 
 
+def _claim_clip_slot(call_ref, call_ts):
+    """Atomically records that this call's verification clip arrived. False if a clip was already submitted
+    or the call was replaced/removed in the meantime (so a double upload can't start two analyses)."""
+
+    @firestore.transactional
+    def _txn(txn):
+        snap = call_ref.get(transaction=txn)
+        if not snap.exists:
+            return False
+        call = snap.to_dict() or {}
+        if call.get('timestamp') != call_ts or call.get('aiClipSubmittedAt'):
+            return False
+        txn.update(call_ref, {'aiClipSubmittedAt': datetime.now(timezone.utc)})
+        return True
+
+    return _txn(get_db().transaction())
+
+
+def _flag_if_no_clip(channel_name, call_ts):
+    """Timer task for 'stream first, clip later': if no clip ever arrived, the call stays live but is flagged
+    for manual review, so skipping verification can't be used to dodge the AI check."""
+    try:
+        call_ref = get_db().collection('ActiveCalls').document(channel_name)
+        now = datetime.now(timezone.utc)
+
+        @firestore.transactional
+        def _txn(txn):
+            snap = call_ref.get(transaction=txn)
+            if not snap.exists:
+                return
+            call = snap.to_dict() or {}
+            if call.get('timestamp') != call_ts or call.get('aiClipSubmittedAt') or call.get('analyzed_at'):
+                return
+            txn.update(call_ref, {'aiUnavailable': True, 'ai_assessment': NO_CLIP_ASSESSMENT, 'analyzed_at': now})
+
+        _txn(get_db().transaction())
+    except Exception:
+        log.exception("No-clip check failed for %s", channel_name)
+
+
 def recover_stuck_analyses(max_age=timedelta(minutes=5)):
     """Call once at boot. A restart kills in-flight analyses (their temp clips are gone), which would leave
-    calls looking 'pending' forever. Calls still 'incoming' with no `analyzed_at` after max_age are flagged
+    calls looking 'pending' forever. Calls still 'incoming' with no analyzed_at after max_age are flagged
     for manual review."""
     try:
         cutoff = datetime.now(timezone.utc) - max_age
@@ -287,8 +330,8 @@ def get_token():
         except ValueError:
             return error("Invalid latitude/longitude.", 400)
 
-    if 'video' not in request.files:
-        return error("Verification video file is required to start the live session.", 400)
+    # The clip is optional here: the app can go live first and send it afterwards to /verify-clip.
+    has_clip = 'video' in request.files
 
     app_id = os.getenv('AGORA_APP_ID')
     app_certificate = os.getenv('AGORA_APP_CERTIFICATE')
@@ -304,12 +347,13 @@ def get_token():
     if existing.exists and (existing.to_dict() or {}).get('reporterUuid') != reporter_uuid:
         return error("This channel name is already in use.", 409)
 
-    temp_file_path = make_temp_video_path()
+    temp_file_path = make_temp_video_path() if has_clip else None
     handed_off = False  # once the background task owns the temp file, it is the one that deletes it
     try:
-        request.files['video'].save(temp_file_path)
-        if os.path.getsize(temp_file_path) == 0:
-            return error("The video file is empty.", 400)
+        if has_clip:
+            request.files['video'].save(temp_file_path)
+            if os.path.getsize(temp_file_path) == 0:
+                return error("The video file is empty.", 400)
 
         # --- Go live immediately: token + call record with provisional values ---
         privilege_expired_ts = int(time.time()) + 3600
@@ -326,6 +370,8 @@ def get_token():
             'timestamp': now,
             'aiMode': ai_mode,  # DEMO-MODE
         }
+        if has_clip:
+            call_payload['aiClipSubmittedAt'] = now
 
         unassigned_station = {
             "stationName": "Unassigned - No On-Duty Station Available",
@@ -342,12 +388,17 @@ def get_token():
         call_ref.set(call_payload)
 
         # --- Everything slow happens after this point, off the request ---
-        try:
-            _executor.submit(_run_analysis, channel_name, now, temp_file_path, ai_mode)
-            handed_off = True
-        except Exception:
-            log.exception("Could not queue AI analysis")
-            _mark_ai_failed(call_ref, now)
+        if has_clip:
+            try:
+                _executor.submit(_run_analysis, channel_name, now, temp_file_path, ai_mode)
+                handed_off = True
+            except Exception:
+                log.exception("Could not queue AI analysis")
+                _mark_ai_failed(call_ref, now)
+        else:
+            timer = threading.Timer(CLIP_GRACE_SEC, _flag_if_no_clip, args=(channel_name, now))
+            timer.daemon = True
+            timer.start()
 
         if lat_val is not None:
             try:
@@ -362,7 +413,9 @@ def get_token():
             "channelName": channel_name,
             "uid": uid,
             "aiMode": ai_mode,  # DEMO-MODE: lets the app show which mode is active
-            "message": "Live session started. AI verification is running in the background.",
+            "message": ("Live session started. AI verification is running in the background." if has_clip
+                        else "Live session started. Send the verification clip to /verify-clip."),
+            "clipExpected": not has_clip,  # True = the app should now record and POST the clip to /verify-clip
             # Same shape the client used to receive, filled with provisional values.
             "assessment": {
                 "pending": True,
@@ -376,6 +429,61 @@ def get_token():
         log.exception("Token generation failed")
         return error("Could not start the live session. Please try again.", 500)
 
+    finally:
+        if temp_file_path and not handed_off:
+            _remove_file(temp_file_path)
+
+
+@live_bp.route('/verify-clip', methods=['POST'])
+@require_auth
+@user_rate_limit('verify-clip', 20, 3600)
+def verify_clip():
+    """Second half of 'stream first, verify in parallel': the app is already live and sends the short
+    verification clip as soon as it has recorded it. Analysis then runs in the background as usual."""
+    channel_name = request.form.get('channelName')
+    if not channel_name or 'video' not in request.files:
+        return error("Missing channelName or video file.", 400)
+    if not valid_channel(channel_name):
+        return error("Invalid channelName.", 400)
+
+    call_ref = get_db().collection('ActiveCalls').document(channel_name)
+    snap = call_ref.get()
+    if not snap.exists:
+        return error(f"Active call '{channel_name}' not found.", 404)
+    call = snap.to_dict() or {}
+    if call.get('reporterUuid') != g.uid:
+        return error("Unauthorized: this call does not belong to you.", 403)
+    if str(call.get('status') or '').lower() == 'cancelled_fake':
+        return error("This report was already rejected.", 403)
+    call_ts = call.get('timestamp')
+
+    # DEMO-MODE: reuse the mode chosen at /get-token unless the app sends aiMode again.
+    ai_mode = resolve_mode(request.form.get('aiMode') or call.get('aiMode'))
+
+    temp_file_path = make_temp_video_path()
+    handed_off = False
+    try:
+        request.files['video'].save(temp_file_path)
+        if os.path.getsize(temp_file_path) == 0:
+            return error("The video file is empty.", 400)
+        if not _claim_clip_slot(call_ref, call_ts):
+            return error("A verification clip was already submitted for this call.", 409)
+
+        try:
+            _executor.submit(_run_analysis, channel_name, call_ts, temp_file_path, ai_mode)
+            handed_off = True
+        except Exception:
+            log.exception("Could not queue AI analysis")
+            _mark_ai_failed(call_ref, call_ts)
+
+        return jsonify({
+            "success": True,
+            "aiMode": ai_mode,  # DEMO-MODE
+            "message": "Verification clip received. AI verification is running in the background.",
+        }), 200
+    except Exception:
+        log.exception("Verification clip failed")
+        return error("Could not process the verification clip. Please try again.", 500)
     finally:
         if not handed_off:
             _remove_file(temp_file_path)
