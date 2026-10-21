@@ -67,6 +67,8 @@ from community.hazard import community_bp
 from responder.duty import responder_bp
 from responder.history_unit import responder_history_bp
 from responder.resolve import responder_resolve_bp
+import auth.forgotpassword
+import auth.changepassword
 
 app.register_blueprint(community_bp, url_prefix="/api/community")
 app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -76,6 +78,7 @@ app.register_blueprint(responder.location.responder_bp, url_prefix="/api/respond
 app.register_blueprint(history_user_bp, url_prefix="/api/live")
 app.register_blueprint(responder_history_bp, url_prefix="/api/responder")
 app.register_blueprint(responder_resolve_bp, url_prefix="/api/responder")
+
 
 
 # --- Hardening --------------------------------------------------------------
