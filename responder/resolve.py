@@ -6,7 +6,7 @@ from google.cloud import firestore
 
 from app_core import get_db
 from app_security import (GLOBAL_ADMIN_ROLES, TERMINAL_STATUSES, UNIT_RE, call_unit_ids, error, get_profile,
-                          profile_role, require_auth, responder_can_access_call, user_rate_limit, valid_channel)
+                         profile_role, require_auth, responder_can_access_call, user_rate_limit, valid_channel)
 
 log = logging.getLogger(__name__)
 responder_resolve_bp = Blueprint('responder_resolve', __name__)
@@ -43,9 +43,15 @@ def _station_of(call):
     return call.get('stationId') or st.get('stationId')
 
 
+def _get_responder_name(profile):
+    """Safely extracts and formats the responder's name from multiple profile schema variations."""
+    first = profile.get('firstName', '').strip()
+    last = profile.get('lastName', '').strip()
+    return f"{first} {last}".strip() or profile.get('name') or profile.get('fullName') or 'Unknown Responder'
+
+
 # ---------------------------------------------------------------------------
-# STEP 1: close the call. status -> 'resolved' makes listener.py push END_LIVE_SESSION
-# to the units and the citizen, so the live stream ends immediately.
+# STEP 1: Close the call. Records resolver UID, Unit, and Name.
 # ---------------------------------------------------------------------------
 @responder_resolve_bp.route('/resolve', methods=['POST'])
 @require_auth(responder=True)
@@ -68,17 +74,20 @@ def resolve_call():
         profile = _authorize(call)
 
         status = str(call.get('status') or '').lower()
-        if status == 'resolved':  # idempotent: a retry after a network drop is fine
+        if status == 'resolved':  
             return 'already_resolved'
         if status in TERMINAL_STATUSES:
             raise _Abort(f"This call is already closed ('{status}') and can't be resolved.", 409)
+
+        responder_name = _get_responder_name(profile)
 
         txn.update(ref, {
             'status': 'resolved',
             'resolvedAt': datetime.now(timezone.utc),
             'resolvedByUid': g.uid,
             'resolvedByUnitId': profile.get('unitId'),
-            'reportStatus': 'pending',  # admin dashboard can filter calls still missing a report
+            'resolvedByName': responder_name,
+            'reportStatus': 'pending',  
         })
         return 'resolved'
 
@@ -99,15 +108,7 @@ def resolve_call():
 
 
 # ---------------------------------------------------------------------------
-# STEP 2: short written report for the admin -> 'IncidentReports/<callId>'.
-# Body: {
-#   "channelName": "<callId>",
-#   "report": "what happened / how resolved", required, 10-2000 chars
-#   "injuries": 0, "fatalities": 0,          required numbers (0 is allowed)
-#   "outcome": "resolved_on_scene",          optional, dropdown (see OUTCOMES)
-#   "peopleInvolved": "Juan (victim), Pedro (witness)",   optional, one text box
-#   "unitId": "Alpha_1"                      optional
-# }
+# STEP 2: Submit report under the 'IncidentReport' subdocument inside ActiveCalls
 # ---------------------------------------------------------------------------
 @responder_resolve_bp.route('/report', methods=['POST'])
 @require_auth(responder=True)
@@ -129,7 +130,7 @@ def submit_report():
     if len(text) > MAX_REPORT_LEN:
         return error(f"Report is too long (max {MAX_REPORT_LEN} characters).", 400)
 
-    outcome = str(data.get('outcome') or '').strip().lower() or None   # optional
+    outcome = str(data.get('outcome') or '').strip().lower() or None   
     if outcome and outcome not in OUTCOMES:
         return error(f"Invalid outcome. Use one of: {', '.join(sorted(OUTCOMES))}.", 400)
 
@@ -155,7 +156,6 @@ def submit_report():
 
     db = get_db()
     call_ref = db.collection('ActiveCalls').document(channel_name)
-    report_ref = db.collection('IncidentReports').document(channel_name)
 
     @firestore.transactional
     def _txn(txn):
@@ -168,38 +168,37 @@ def submit_report():
         if str(call.get('status') or '').lower() != 'resolved':
             raise _Abort("Resolve the call first before submitting the report.", 409)
 
-        existing = report_ref.get(transaction=txn)
-        old = existing.to_dict() if existing.exists else {}
-        if old.get('reviewStatus') == 'reviewed':
-            raise _Abort("This report was already reviewed by an admin and can no longer be edited.", 409)
-
+        existing_report = call.get('IncidentReport') or {}
         now = datetime.now(timezone.utc)
-        txn.set(report_ref, {
-            'report': text,
-            'outcome': outcome,
-            'peopleInvolved': people or None,
-            'injuries': counts['injuries'],
-            'fatalities': counts['fatalities'],
-            'callId': channel_name,
-            'stationId': _station_of(call) or profile.get('stationId'),
-            'unitIds': call_unit_ids(call),
-            'reportedByUnitId': unit_id or profile.get('unitId'),
-            'reportedByUid': g.uid,
-            'reporterUuid': call.get('reporterUuid'),  # citizen who made the call
-            'callTimestamp': call.get('timestamp'),
-            'resolvedAt': call.get('resolvedAt'),
-            'reviewStatus': 'pending',                  # admin: pending -> reviewed
-            'submittedAt': old.get('submittedAt') or now,
-            'updatedAt': now,
+        was_update = bool(existing_report)
+        responder_name = _get_responder_name(profile)
+
+        # Store all report info inside the 'IncidentReport' map subdocument
+        txn.update(call_ref, {
+            'IncidentReport': {
+                'report': text,
+                'outcome': outcome,
+                'peopleInvolved': people or None,
+                'injuries': counts['injuries'],
+                'fatalities': counts['fatalities'],
+                'stationId': _station_of(call) or profile.get('stationId'),
+                'unitIds': call_unit_ids(call),
+                'reportedByUnitId': unit_id or profile.get('unitId'),
+                'reportedByUid': g.uid,
+                'reportedByName': responder_name,
+                'submittedAt': existing_report.get('submittedAt') or now,
+                'updatedAt': now,
+            },
+            'reportStatus': 'submitted',
+            'reportSubmittedAt': now
         })
-        txn.update(call_ref, {'reportStatus': 'submitted', 'reportSubmittedAt': now})
-        return bool(old)
+        return was_update
 
     try:
         was_update = _txn(db.transaction())
         return jsonify({
             "success": True,
-            "message": "Report updated." if was_update else "Report submitted to admin.",
+            "message": "IncidentReport updated." if was_update else "IncidentReport submitted successfully.",
             "callId": channel_name,
         }), 200
     except _Abort as e:
