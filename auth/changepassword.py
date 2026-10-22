@@ -7,14 +7,15 @@ import logging
 
 from firebase_admin import auth
 from flask import g, jsonify, request
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from app_core import get_db
 from app_security import (MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, error, firebase_sign_in, get_profile,
                           limiter, require_auth)
-from .verify import issue_password_otp, password_otp_failure, verify_password_otp
 from .register import auth_bp
+from .verify import issue_password_otp, password_otp_failure, verify_password_otp
 
-log = logging.getLogger(__name__)
+log = logging.getLogger(_name_)
 
 
 def _account_email():
@@ -63,20 +64,33 @@ def change_password_confirm():
             status = fail[1] if fail[1] in (429, 503) else 401
             return error("Invalid current password." if status == 401 else fail[0], status)
 
-        # 2. OTP (single use, bound to this uid)
+        # 2. Check password history to prevent reusing recent passwords[cite: 2]
+        coll, profile = get_profile()
+        password_history = profile.get('password_history', []) if profile else []
+        for old_hash in password_history:
+            if check_password_hash(old_hash, new_password):
+                return error("New password cannot be one of your recent passwords.", 400)
+
+        # 3. OTP (single use, bound to this uid)[cite: 2]
         result, _ = verify_password_otp("change", email, code, mode="consume", expected_uid=g.uid)
         if result != "ok":
             return password_otp_failure(result)
 
-        # 3. Update the password
+        # 4. Update the password[cite: 2]
         auth.update_user(g.uid, password=new_password)
 
-        # 4. Profile flag (responders' first-login flow) in whichever collection holds the profile
-        coll, _profile = get_profile()
-        if coll:
-            get_db().collection(coll).document(g.uid).set({"is_new": False}, merge=True)
+        # 5. Update password history (store old password hash) and profile flags
+        new_history_entry = generate_password_hash(old_password)
+        updated_history = [new_history_entry] + [h for h in password_history if not check_password_hash(h, new_password)]
+        updated_history = updated_history[:3]  # Keep last 3 passwords
 
-        # 5. A password change invalidates old refresh tokens: sign in again so THIS device stays logged in.
+        if coll:
+            get_db().collection(coll).document(g.uid).set({
+                "is_new": False,
+                "password_history": updated_history
+            }, merge=True)
+
+        # 6. A password change invalidates old refresh tokens: sign in again so THIS device stays logged in.[cite: 2]
         tokens, fail = firebase_sign_in(email, new_password)
         resp = {"success": True, "message": "Password updated successfully."}
         if not fail:
