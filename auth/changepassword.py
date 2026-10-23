@@ -15,7 +15,7 @@ from app_security import (MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, error, firebase_si
 from .register import auth_bp
 from .verify import issue_password_otp, password_otp_failure, verify_password_otp
 
-log = logging.getLogger(_name_)
+log = logging.getLogger(__name__)
 
 
 def _account_email():
@@ -64,19 +64,19 @@ def change_password_confirm():
             status = fail[1] if fail[1] in (429, 503) else 401
             return error("Invalid current password." if status == 401 else fail[0], status)
 
-        # 2. Check password history to prevent reusing recent passwords[cite: 2]
+        # 2. Check password history to prevent reusing recent passwords
         coll, profile = get_profile()
         password_history = profile.get('password_history', []) if profile else []
         for old_hash in password_history:
             if check_password_hash(old_hash, new_password):
                 return error("New password cannot be one of your recent passwords.", 400)
 
-        # 3. OTP (single use, bound to this uid)[cite: 2]
+        # 3. OTP (single use, bound to this uid)
         result, _ = verify_password_otp("change", email, code, mode="consume", expected_uid=g.uid)
         if result != "ok":
             return password_otp_failure(result)
 
-        # 4. Update the password[cite: 2]
+        # 4. Update the password
         auth.update_user(g.uid, password=new_password)
 
         # 5. Update password history (store old password hash) and profile flags
@@ -90,7 +90,7 @@ def change_password_confirm():
                 "password_history": updated_history
             }, merge=True)
 
-        # 6. A password change invalidates old refresh tokens: sign in again so THIS device stays logged in.[cite: 2]
+        # 6. A password change invalidates old refresh tokens: sign in again so THIS device stays logged in.
         tokens, fail = firebase_sign_in(email, new_password)
         resp = {"success": True, "message": "Password updated successfully."}
         if not fail:
