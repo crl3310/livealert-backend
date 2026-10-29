@@ -63,12 +63,14 @@ import auth.refresh
 import responder.location
 from live.history_user import history_user_bp
 from live.live import live_bp
+from live.user_location import user_location_bp  # NEW: reporter location tracker
 from community.hazard import community_bp
 from responder.duty import responder_bp
 from responder.history_unit import responder_history_bp
 from responder.resolve import responder_resolve_bp
 import auth.forgotpassword
 import auth.changepassword
+from live.sos import sos_bp
 
 app.register_blueprint(community_bp, url_prefix="/api/community")
 app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -76,9 +78,10 @@ app.register_blueprint(live_bp, url_prefix="/api/live")
 app.register_blueprint(responder_bp, url_prefix="/api/responder")
 app.register_blueprint(responder.location.responder_bp, url_prefix="/api/responder")
 app.register_blueprint(history_user_bp, url_prefix="/api/live")
+app.register_blueprint(user_location_bp, url_prefix="/api/live")  # NEW: /api/live/location-update
 app.register_blueprint(responder_history_bp, url_prefix="/api/responder")
 app.register_blueprint(responder_resolve_bp, url_prefix="/api/responder")
-
+app.register_blueprint(sos_bp, url_prefix="/api/live")
 
 
 # --- Hardening --------------------------------------------------------------
@@ -119,9 +122,10 @@ def healthz():
 def _start_listeners():
     try:
         from responder.listener import start_active_calls_listener
-        from live.user_listener import setup_active_calls_listener
+        from live.user_listener import setup_active_calls_listener, setup_chat_push_listener
 
         setup_active_calls_listener(get_db())
+        setup_chat_push_listener(get_db())  # quiet push to the reporter when the admin sends a chat message
         start_active_calls_listener()
     except Exception:
         log.exception("Failed to start Firestore listeners")

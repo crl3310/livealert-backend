@@ -47,6 +47,17 @@ class EmergencyAnalysis(BaseModel):
         le=4,
         description="Threat level as an integer from 1 to 4:\n" + THREAT_LEVEL_SCALE,
     )
+    emergency_confidence: int = Field(
+        ge=0,
+        le=100,
+        description=(
+            "How certain you are, as a percentage from 0 to 100, that this footage shows a genuine emergency. "
+            "0 = certain it is NOT an emergency, 100 = certain it IS. "
+            "If you cannot see or hear enough to tell (too dark, camera blocked, covered or pointed away, "
+            "muffled or silent audio), answer 50 and say so in the summary. "
+            "Never answer low just because you cannot see: the reporter may be in danger and unable to show it."
+        ),
+    )
     summary: str = Field(
         description=(
             "A summary of the incident: what is happening and what is audible. "

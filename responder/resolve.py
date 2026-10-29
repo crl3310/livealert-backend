@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, g, jsonify, request
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app_core import get_db
 from app_security import (GLOBAL_ADMIN_ROLES, TERMINAL_STATUSES, UNIT_RE, call_unit_ids, error, get_profile,
@@ -36,6 +37,16 @@ def _authorize(call):
     if assigned and my_unit not in assigned and g.uid not in assigned:
         raise _Abort("Your unit is not assigned to this call.", 403)
     return profile
+
+
+def _authorize_report(call):
+    """Reports are filed later, after the responder may have moved on to another emergency.
+    The responder who closed the call may always file its report, even if the call's
+    unit/station assignment has since changed. Everyone else goes through _authorize."""
+    _, profile = get_profile()
+    if call.get('resolvedByUid') == g.uid:
+        return profile
+    return _authorize(call)
 
 
 def _station_of(call):
@@ -95,7 +106,7 @@ def resolve_call():
         result = _txn(db.transaction())
         return jsonify({
             "success": True,
-            "message": "Call resolved. Live session ended. Please submit the report.",
+            "message": "Call resolved. Live session ended. The report can be submitted now or later.",
             "alreadyResolved": result == 'already_resolved',
             "reportRequired": True,
             "callId": channel_name,
@@ -163,7 +174,7 @@ def submit_report():
         if not snap.exists:
             raise _Abort("Active call not found.", 404)
         call = snap.to_dict() or {}
-        profile = _authorize(call)
+        profile = _authorize_report(call)
 
         if str(call.get('status') or '').lower() != 'resolved':
             raise _Abort("Resolve the call first before submitting the report.", 409)
@@ -206,3 +217,39 @@ def submit_report():
     except Exception:
         log.exception("Failed to submit report")
         return error("Failed to submit report.", 500)
+
+# ---------------------------------------------------------------------------
+# STEP 1.5: List calls this responder closed but hasn't filed a report for yet.
+# The app uses this to show "pending reports" so a report can be filled in later
+# (after another emergency, an app restart, a shift handover on the same device, etc.).
+# ---------------------------------------------------------------------------
+@responder_resolve_bp.route('/reports/pending', methods=['GET'])
+@require_auth(responder=True)
+@user_rate_limit('pending_reports', 30, 60)
+def pending_reports():
+    try:
+        db = get_db()
+        snaps = (db.collection('ActiveCalls')
+                   .where(filter=FieldFilter('resolvedByUid', '==', g.uid))
+                   .where(filter=FieldFilter('reportStatus', '==', 'pending'))
+                   .limit(50)
+                   .stream())
+
+        items = []
+        for snap in snaps:
+            call = snap.to_dict() or {}
+            resolved_at = call.get('resolvedAt')
+            items.append({
+                "callId": snap.id,
+                "resolvedAt": resolved_at.isoformat() if hasattr(resolved_at, 'isoformat') else None,
+                "stationId": _station_of(call),
+                "unitIds": call_unit_ids(call),
+                # Add whatever the app needs to show which emergency this was
+                # (address, emergency type, ...) using your ActiveCalls field names.
+            })
+
+        items.sort(key=lambda i: i["resolvedAt"] or "", reverse=True)
+        return jsonify({"success": True, "count": len(items), "pending": items}), 200
+    except Exception:
+        log.exception("Failed to list pending reports")
+        return error("Failed to load pending reports.", 500)

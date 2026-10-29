@@ -31,8 +31,12 @@ AI_MAX_ATTEMPTS = int(os.getenv("AI_MAX_ATTEMPTS", "2"))  # retries are cheap no
 AI_WORKERS = int(os.getenv("AI_WORKERS", "6"))            # max simultaneous Gemini analyses
 CLIP_GRACE_SEC = int(os.getenv("CLIP_GRACE_SEC", "120"))  # live call with no verification clip after this long -> manual review
 
-DEFAULT_THREAT_LEVEL = 2  # provisional level shown until the AI replies (also used if the AI returns junk)
-NO_THREAT_LEVEL = 0       # used for rejected/fake reports
+UNKNOWN_THREAT_LEVEL = 0  # shown until the AI replies, and kept if the AI fails or returns junk: 0 = not assessed yet
+FAKE_THREAT_LEVEL = "fake"  # written into threatLevel when the AI thinks the report is probably fake
+# "Probably fake" = the AI flagged it AND its emergency confidence is below this. The prompt tells the AI to answer 50
+# when it simply can't see or hear enough, so unclear footage is NOT labelled fake; its threatLevel is left as it is
+# (0 = unknown) for the admin to decide.
+FAKE_CONFIDENCE_BELOW = int(os.getenv("FAKE_CONFIDENCE_BELOW", "50"))
 
 # Written to the existing fields while the AI is still working. A call with no analyzed_at yet is still pending.
 PENDING_INCIDENT_TYPE = "Pending AI Analysis"
@@ -44,13 +48,22 @@ NO_CLIP_ASSESSMENT = "No verification clip was received; this report needs manua
 _executor = ThreadPoolExecutor(max_workers=AI_WORKERS, thread_name_prefix="ai-analysis")
 
 
-def normalize_threat_level(value, default=DEFAULT_THREAT_LEVEL):
-    """Coerces the AI's threat level into an integer between 1 and 4."""
+def normalize_threat_level(value, default=UNKNOWN_THREAT_LEVEL):
+    """Coerces the AI's threat level into an integer between 1 and 4 (0 = unknown if it is unusable)."""
     try:
         level = int(value)
     except (TypeError, ValueError):
         return default
     return max(1, min(4, level))
+
+
+def normalize_confidence(value):
+    """The AI's certainty (0-100) that the footage is a real emergency. None if missing or unusable."""
+    try:
+        pct = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0, min(100, pct))
 
 
 def make_temp_video_path():
@@ -138,14 +151,20 @@ def _mark_ai_failed(call_ref, call_ts):
 def _apply_analysis(call_ref, call_ts, analysis):
     """Writes the AI verdict onto the call and returns a short outcome string for logging.
 
-    - real emergency            -> update threat level / type / summary, status untouched
-    - fake, call still 'incoming' -> status 'cancelled_fake' (listener.py then pushes END_LIVE_SESSION)
-    - fake, responders engaged  -> status untouched, flagged in ai_assessment for a human decision.
-                                   A late AI verdict must never override responders who already acted.
+    The AI never ends a call. Whatever it concludes, the call's status is left alone and a human (the admin)
+    makes the final decision:
+    - looks like a real emergency -> threat level / incident type / summary are updated
+    - probably fake (flagged, confidence below FAKE_CONFIDENCE_BELOW)
+                                  -> the call stays live, threatLevel is set to "fake", flagged for the admin
+    - flagged but unclear (confidence at/above the cut-off, e.g. 50 = "can't see")
+                                  -> the call stays live and its numeric threat level is NOT lowered; flagged for the admin
+    In both cases the AI's certainty that this is a real emergency (0-100) is saved as aiEmergencyConfidence.
     """
-    is_fake = bool(analysis.get('is_fake', False)) or not analysis.get('is_emergency', True)
+    flagged = bool(analysis.get('is_fake', False)) or not analysis.get('is_emergency', True)
     summary = analysis.get('summary')
     incident_type = analysis.get('incident_type')
+    confidence = normalize_confidence(analysis.get('emergency_confidence'))
+    probably_fake = flagged and confidence is not None and confidence < FAKE_CONFIDENCE_BELOW
     now = datetime.now(timezone.utc)
 
     @firestore.transactional
@@ -157,31 +176,36 @@ def _apply_analysis(call_ref, call_ts, analysis):
         if call.get('timestamp') != call_ts:
             return 'superseded'
 
-        status = str(call.get('status') or '').lower()
-        update = {'analyzed_at': now, 'aiUnavailable': False}
+        update = {
+            'analyzed_at': now,
+            'aiUnavailable': False,
+            'aiFlaggedFake': flagged,
+            'aiEmergencyConfidence': confidence,
+            'aiScreenRecording': bool(analysis.get('is_screen_recording', False)),
+        }
 
-        if not is_fake:
+        if not flagged:
             update.update({
                 'incidentType': incident_type or 'General Emergency',
                 'threatLevel': normalize_threat_level(analysis.get('threat_level')),
                 'ai_assessment': summary,
-                'aiScreenRecording': bool(analysis.get('is_screen_recording', False)),
             })
             outcome = 'verified'
-        elif status == 'incoming':
+        elif probably_fake:
             update.update({
-                'status': 'cancelled_fake',
-                'incidentType': incident_type or 'Fake/Non-Emergency',
-                'threatLevel': NO_THREAT_LEVEL,
-                'ai_assessment': f"REJECTED: {summary or 'Non-emergency report detected.'}",
-            })
-            outcome = 'cancelled_fake'
-        else:
-            update.update({
-                'ai_assessment': f"FLAGGED AS LIKELY FAKE (responders already engaged): "
+                'incidentType': incident_type or 'Unverified Report',
+                'threatLevel': FAKE_THREAT_LEVEL,
+                'ai_assessment': f"AI THINKS THIS IS PROBABLY FAKE (admin review needed): "
                                  f"{summary or 'Non-emergency report detected.'}",
             })
-            outcome = 'flagged_fake'
+            outcome = 'probably_fake'
+        else:
+            update.update({
+                'incidentType': incident_type or 'Unverified Report',
+                'ai_assessment': f"AI COULD NOT CONFIRM AN EMERGENCY (admin review needed): "
+                                 f"{summary or 'Could not tell what is happening.'}",
+            })
+            outcome = 'flagged_unclear'
 
         txn.update(call_ref, update)
         return outcome
@@ -365,7 +389,7 @@ def get_token():
             'reporterUuid': reporter_uuid,
             'status': 'incoming',
             'incidentType': PENDING_INCIDENT_TYPE,
-            'threatLevel': DEFAULT_THREAT_LEVEL,
+            'threatLevel': UNKNOWN_THREAT_LEVEL,
             'ai_assessment': PENDING_ASSESSMENT,
             'timestamp': now,
             'aiMode': ai_mode,  # DEMO-MODE
@@ -419,7 +443,7 @@ def get_token():
             # Same shape the client used to receive, filled with provisional values.
             "assessment": {
                 "pending": True,
-                "threat_level": DEFAULT_THREAT_LEVEL,
+                "threat_level": UNKNOWN_THREAT_LEVEL,
                 "incident_type": PENDING_INCIDENT_TYPE,
                 "summary": PENDING_ASSESSMENT,
             }
@@ -555,4 +579,5 @@ def upload_evidence():
         _remove_file(temp_file_path)
 
 
-from . import routes  # noqa: E402,F401
+from . import routes  
+from . import chat

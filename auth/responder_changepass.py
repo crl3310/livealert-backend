@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import requests
 from flask import g, jsonify, request
@@ -11,22 +12,49 @@ from .register import auth_bp
 
 log = logging.getLogger(__name__)
 
+# Keep this identical to BADGE_RE in your responder login file.
+BADGE_RE = re.compile(r'^[A-Z0-9][A-Z0-9\-]{2,19}$')
+
+
+def normalize_badge(value):
+    """Trim + uppercase. Returns '' if the value isn't a valid badge number."""
+    if not isinstance(value, str):
+        return ''
+    badge = value.strip().upper()
+    return badge if BADGE_RE.match(badge) else ''
+
+
+def _load_profile(coll):
+    """Reads the signed-in user's profile document. Returns {} if it can't be found."""
+    if not coll:
+        return {}
+    try:
+        snap = get_db().collection(coll).document(g.uid).get()
+        return (snap.to_dict() or {}) if snap.exists else {}
+    except Exception:
+        log.exception("Could not load profile for uid %s", g.uid)
+        return {}
+
 
 @auth_bp.route('/responder/change-password', methods=['POST'])
 @limiter.limit("5 per minute; 20 per hour")
 @require_auth
 def change_password():
-    """Requires a valid login token. The account is taken from the token, not from the body."""
+    """
+    Requires a valid login token. The account is taken from the token.
+    The app sends the badge number (not the email); it is only used as a
+    sanity check against the signed-in account.
+    """
     data = request.get_json(silent=True) or {}
     old_password = data.get('old_password')
     new_password = data.get('new_password')
 
+    # Email comes from the token and is used only to talk to Firebase.
     email = (g.claims.get('email') or '').lower()
-    body_email = str(data.get('email') or '').strip().lower()
-    if body_email and body_email != email:
-        return error("Email does not match the signed-in account.", 403)
+    if not email:
+        return error("Signed-in account has no email.", 401)
 
-    if not email or not isinstance(old_password, str) or not isinstance(new_password, str) \
+    if not isinstance(old_password, str) or not isinstance(new_password, str) \
             or not old_password or not new_password:
         return error("Missing old password or new password.", 400)
 
@@ -34,6 +62,17 @@ def change_password():
         return error(f"New password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters long.", 400)
 
     try:
+        # Find which collection holds this profile (Responders or Users)
+        coll, _ = get_profile()
+
+        # Badge sent by the app (if any) must belong to the signed-in account
+        raw_badge = data.get('badge') or data.get('badgeNumber') or data.get('username')
+        if raw_badge:
+            profile = _load_profile(coll)
+            account_badge = normalize_badge(profile.get('badge') or profile.get('badgeNumber'))
+            if not account_badge or normalize_badge(raw_badge) != account_badge:
+                return error("Badge number does not match the signed-in account.", 403)
+
         # 1. Re-authenticate with the current password
         auth_data, fail = firebase_sign_in(email, old_password)
         if fail:
@@ -54,7 +93,6 @@ def change_password():
         new_tokens = update_res.json()
 
         # 3. is_new -> False in whichever collection holds this profile
-        coll, _ = get_profile()
         if coll:
             get_db().collection(coll).document(g.uid).set({"is_new": False}, merge=True)
 
