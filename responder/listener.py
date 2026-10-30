@@ -28,7 +28,7 @@ def _process_snapshot(col_snapshot, changes, read_time):
             # --- HANDLE CALL RESOLUTION / TERMINATION ---
             status = call_data.get('status', '').lower()
             # EXPANDED STATUS CHECK: Catch all variations of resolved/cancelled calls
-            if status in ['resolved', 'cancelled', 'cancelled_fake', 'fake']:
+            if status in ['resolved', 'cancelled']:
                 # Prevent looping if we already sent the termination notice
                 if call_data.get('liveEndedNotified', False):
                     continue

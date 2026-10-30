@@ -160,6 +160,8 @@ def responder_login():
                           "message": "Your responder account was logged in from another device."},
                 ))
                 log.info("Sent FORCE_LOGOUT push to previous device for responder %s", uid)
+            except messaging.UnregisteredError:
+                log.warning("Old FCM token for responder %s was unregistered/expired. Skipping force-logout push.", uid)
             except Exception:
                 log.exception("Failed to send responder force logout notification")
 
