@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, g, jsonify, request
 from google.api_core.exceptions import NotFound
+from google.cloud import firestore
 from google.cloud.firestore import GeoPoint
 
 from app_core import get_db
@@ -10,6 +11,64 @@ from app_security import TERMINAL_STATUSES, error, parse_coords, require_auth, u
 
 log = logging.getLogger(__name__)
 user_location_bp = Blueprint('user_location', __name__)
+
+LOCATION_FIELD = "location"
+
+
+# ---------------------------------------------------------------------------
+# Shared location helpers. sos.py imports these too, so /location-update, /sos and
+# /sos/location all write the reporter's position into the SAME existing `location` map:
+#   location.coordinates (GeoPoint), latitude, longitude, updatedByUid, updatedAt,
+#   plus heading / speed / accuracy when the app sends them.
+# The reverse-geocoded address stays at `location.address` and is never overwritten here.
+# No separate field (like the old `userLocation`) is created.
+# ---------------------------------------------------------------------------
+def parse_motion(data):
+    """Optional heading / speed / accuracy as floats. Missing or empty values are skipped.
+
+    Raises ValueError/TypeError if a value is sent but is not a number.
+    """
+    motion = {}
+    for key in ("heading", "speed", "accuracy"):
+        value = data.get(key)
+        if value is None or value == "":
+            continue
+        motion[key] = float(value)
+    return motion
+
+
+def location_fields(lat, lon, uid, motion=None, now=None):
+    """Position fields that live inside the existing `location` map (flat, no prefix).
+
+    The reverse-geocoded `address` is not included; it is written separately.
+    """
+    fields = {
+        "coordinates": GeoPoint(lat, lon),
+        "latitude": lat,
+        "longitude": lon,
+        "updatedByUid": uid,
+        "updatedAt": now or datetime.now(timezone.utc),
+    }
+    fields.update(motion or {})
+    return fields
+
+
+def location_update(lat, lon, uid, motion=None, now=None):
+    """Dict for doc_ref.update(): sets each field as `location.<field>`.
+
+    Dotted paths only touch those keys, so `location.address` is preserved.
+    """
+    update = {f"{LOCATION_FIELD}.{k}": v
+              for k, v in location_fields(lat, lon, uid, motion, now).items()}
+    # Cleanup: removes the legacy `userLocation` field from older documents on their next ping.
+    # Safe to delete this line once no old documents remain.
+    update["userLocation"] = firestore.DELETE_FIELD
+    return update
+
+
+def has_location(call):
+    """True if the call already has coordinates inside `location`."""
+    return (call.get(LOCATION_FIELD) or {}).get("coordinates") is not None
 
 
 def _is_call_owner(call):
@@ -35,10 +94,7 @@ def update_user_location():
 
     try:
         lat_val, lon_val = parse_coords(latitude, longitude)
-        heading = float(data.get('heading', 0.0))   # compass direction (0-360)
-        speed = float(data.get('speed', 0.0))
-        accuracy = data.get('accuracy')
-        accuracy = float(accuracy) if accuracy is not None else None
+        motion = parse_motion(data)  # optional heading (0-360), speed, accuracy
     except (TypeError, ValueError):
         return error("Invalid coordinates, heading, speed or accuracy.", 400)
 
@@ -58,21 +114,10 @@ def update_user_location():
         if current_status in TERMINAL_STATUSES:
             return jsonify({"success": True, "message": "Session closed. Location update ignored."}), 200
 
-        location = {
-            'coordinates': GeoPoint(lat_val, lon_val),
-            'latitude': lat_val,
-            'longitude': lon_val,
-            'heading': heading,
-            'speed': speed,
-            'updatedByUid': g.uid,
-            'updatedAt': datetime.now(timezone.utc),
-        }
-        if accuracy is not None:
-            location['accuracy'] = accuracy
-
-        # Only touches userLocation; status is left alone so listeners aren't re-triggered.
+        # Only touches the position keys inside `location` (same ones /sos uses);
+        # location.address and status are left alone so listeners aren't re-triggered.
         try:
-            doc_ref.update({'userLocation': location})
+            doc_ref.update(location_update(lat_val, lon_val, g.uid, motion))
         except NotFound:
             return error("Active call not found.", 404)
 

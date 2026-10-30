@@ -23,8 +23,10 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app_core import get_db
+from .user_location import location_fields, location_update, has_location, parse_motion
 from app_security import TERMINAL_STATUSES, as_aware_utc, error, parse_coords, require_auth, user_rate_limit
 from .utils import find_nearest_police_station, get_readable_address
+
 
 log = logging.getLogger(__name__)
 
@@ -106,8 +108,9 @@ def create_sos():
     data = _payload()
     try:
         lat_val, lon_val = _coords(data)
-    except ValueError:
-        return error("Invalid latitude/longitude.", 400)
+        motion = parse_motion(data)
+    except (TypeError, ValueError):
+        return error("Invalid latitude/longitude, heading, speed or accuracy.", 400)
 
     try:
         db = get_db()
@@ -140,7 +143,11 @@ def create_sos():
             "aiScreenRecording": False,
         }
         if lat_val is not None:
-            call_payload["location"] = {"latitude": lat_val, "longitude": lon_val, "address": "Location found"}
+            # Everything goes into the existing `location` map (no separate field).
+            call_payload["location"] = {
+                **location_fields(lat_val, lon_val, g.uid, motion, now),
+                "address": "Location found",  # filled in by the address task
+            }
             call_payload["assignedStation"] = _station_for(lat_val, lon_val)
         else:
             call_payload["assignedStation"] = UNASSIGNED_STATION
@@ -171,8 +178,9 @@ def update_sos_location():
     data = _payload()
     try:
         lat_val, lon_val = _coords(data)
-    except ValueError:
-        return error("Invalid latitude/longitude.", 400)
+        motion = parse_motion(data)
+    except (TypeError, ValueError):
+        return error("Invalid latitude/longitude, heading, speed or accuracy.", 400)
     if lat_val is None:
         return error("latitude and longitude are required.", 400)
 
@@ -186,14 +194,11 @@ def update_sos_location():
 
     try:
         now = datetime.now(timezone.utc)
-        update = {
-            "location.latitude": lat_val,
-            "location.longitude": lon_val,
-            "locationUpdatedAt": now,
-        }
+        # Updates only the position keys inside `location`; location.address is preserved.
+        update = location_update(lat_val, lon_val, g.uid, motion, now)
 
         # The SOS was sent before GPS was ready: pick the nearest station now.
-        if "location" not in call:
+        if not has_location(call):
             update["assignedStation"] = _station_for(lat_val, lon_val)
 
         last_addr = call.get("addressUpdatedAt")
