@@ -244,8 +244,8 @@ def pending_reports():
                 "resolvedAt": resolved_at.isoformat() if hasattr(resolved_at, 'isoformat') else None,
                 "stationId": _station_of(call),
                 "unitIds": call_unit_ids(call),
-                # Add whatever the app needs to show which emergency this was
-                # (address, emergency type, ...) using your ActiveCalls field names.
+                "incidentType": call.get('incidentType'),
+                "address": (call.get('location') or {}).get('address'),
             })
 
         items.sort(key=lambda i: i["resolvedAt"] or "", reverse=True)
