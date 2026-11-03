@@ -310,6 +310,8 @@ def get_token():
     if request.form.get('uuid') and request.form.get('uuid') != g.uid:
         return error("uuid does not match the signed-in account.", 403)
 
+    reporter_uuid = g.uid  # the signed-in account owns this call
+
     if not channel_name:
         return error("channelName is required.", 400)
     if not valid_channel(channel_name):
