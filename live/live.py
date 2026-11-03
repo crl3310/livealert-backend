@@ -24,18 +24,20 @@ log = logging.getLogger(__name__)
 live_bp = Blueprint('live', __name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")  # verify this model name is valid for your API key
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash") 
 GEMINI_PROCESSING_TIMEOUT_SEC = 60
 
-AI_MAX_ATTEMPTS = int(os.getenv("AI_MAX_ATTEMPTS", "2"))  # retries are cheap now that nobody is waiting on them
-AI_WORKERS = int(os.getenv("AI_WORKERS", "6"))            # max simultaneous Gemini analyses
-CLIP_GRACE_SEC = int(os.getenv("CLIP_GRACE_SEC", "120"))  # live call with no verification clip after this long -> manual review
+AI_MAX_ATTEMPTS = int(os.getenv("AI_MAX_ATTEMPTS", "2")) 
+AI_WORKERS = int(os.getenv("AI_WORKERS", "6"))           
+CLIP_GRACE_SEC = int(os.getenv("CLIP_GRACE_SEC", "120")) 
 
-UNKNOWN_THREAT_LEVEL = 0  # shown until the AI replies, and kept if the AI fails or returns junk: 0 = not assessed yet
-FAKE_THREAT_LEVEL = "fake"  # written into threatLevel when the AI thinks the report is probably fake
+UNKNOWN_THREAT_LEVEL = 0 
+FAKE_THREAT_LEVEL = "fake" 
+
 # "Probably fake" = the AI flagged it AND its emergency confidence is below this. The prompt tells the AI to answer 50
 # when it simply can't see or hear enough, so unclear footage is NOT labelled fake; its threatLevel is left as it is
 # (0 = unknown) for the admin to decide.
+
 FAKE_CONFIDENCE_BELOW = int(os.getenv("FAKE_CONFIDENCE_BELOW", "50"))
 
 # Written to the existing fields while the AI is still working. A call with no analyzed_at yet is still pending.
@@ -81,8 +83,6 @@ def _remove_file(path):
         log.warning("Could not delete temp file %s", path)
 
 
-# Prompt + response schema now come from ai_mode.py (switchable permissive/restrictive).
-
 
 def analyze_video(video_path, mode):
     """Uploads the clip to Gemini, returns the parsed analysis dict. Always cleans up the Gemini file."""
@@ -117,10 +117,6 @@ def analyze_video(video_path, mode):
                 log.warning("Failed to delete Gemini file")
 
 
-# ---------------------------------------------------------------------------
-# Background work. Nothing below may touch flask's request / g: it runs on pool threads,
-# so everything it needs is passed in as plain arguments.
-# ---------------------------------------------------------------------------
 def _update_if_current(call_ref, call_ts, fields):
     """Applies fields to the call only if it is still the same call (same creation timestamp).
     If the reporter restarted the same channel in the meantime, a late result must not touch the new call."""
@@ -149,17 +145,7 @@ def _mark_ai_failed(call_ref, call_ts):
 
 
 def _apply_analysis(call_ref, call_ts, analysis):
-    """Writes the AI verdict onto the call and returns a short outcome string for logging.
 
-    The AI never ends a call. Whatever it concludes, the call's status is left alone and a human (the admin)
-    makes the final decision:
-    - looks like a real emergency -> threat level / incident type / summary are updated
-    - probably fake (flagged, confidence below FAKE_CONFIDENCE_BELOW)
-                                  -> the call stays live, threatLevel is set to "fake", flagged for the admin
-    - flagged but unclear (confidence at/above the cut-off, e.g. 50 = "can't see")
-                                  -> the call stays live and its numeric threat level is NOT lowered; flagged for the admin
-    In both cases the AI's certainty that this is a real emergency (0-100) is saved as aiEmergencyConfidence.
-    """
     flagged = bool(analysis.get('is_fake', False)) or not analysis.get('is_emergency', True)
     summary = analysis.get('summary')
     incident_type = analysis.get('incident_type')
@@ -179,7 +165,6 @@ def _apply_analysis(call_ref, call_ts, analysis):
         update = {
             'analyzed_at': now,
             'aiUnavailable': False,
-            'aiFlaggedFake': flagged,
             'aiEmergencyConfidence': confidence,
             'aiScreenRecording': bool(analysis.get('is_screen_recording', False)),
         }
@@ -212,7 +197,6 @@ def _apply_analysis(call_ref, call_ts, analysis):
 
     return _txn(get_db().transaction())
 
-
 def _run_analysis(channel_name, call_ts, video_path, mode):
     """Pool task: analyse the clip, write the verdict, always delete the temp file."""
     call_ref = get_db().collection('ActiveCalls').document(channel_name)
@@ -241,7 +225,7 @@ def _run_analysis(channel_name, call_ts, video_path, mode):
 
 
 def _fill_address(channel_name, call_ts, lat, lon):
-    """Pool task: reverse geocoding can take seconds, so it no longer blocks the report."""
+
     try:
         address = get_readable_address(lat, lon)
         if not address:
@@ -253,8 +237,6 @@ def _fill_address(channel_name, call_ts, lat, lon):
 
 
 def _claim_clip_slot(call_ref, call_ts):
-    """Atomically records that this call's verification clip arrived. False if a clip was already submitted
-    or the call was replaced/removed in the meantime (so a double upload can't start two analyses)."""
 
     @firestore.transactional
     def _txn(txn):
@@ -271,8 +253,7 @@ def _claim_clip_slot(call_ref, call_ts):
 
 
 def _flag_if_no_clip(channel_name, call_ts):
-    """Timer task for 'stream first, clip later': if no clip ever arrived, the call stays live but is flagged
-    for manual review, so skipping verification can't be used to dodge the AI check."""
+    
     try:
         call_ref = get_db().collection('ActiveCalls').document(channel_name)
         now = datetime.now(timezone.utc)
@@ -293,9 +274,7 @@ def _flag_if_no_clip(channel_name, call_ts):
 
 
 def recover_stuck_analyses(max_age=timedelta(minutes=5)):
-    """Call once at boot. A restart kills in-flight analyses (their temp clips are gone), which would leave
-    calls looking 'pending' forever. Calls still 'incoming' with no analyzed_at after max_age are flagged
-    for manual review."""
+    
     try:
         cutoff = datetime.now(timezone.utc) - max_age
         count = 0
@@ -318,9 +297,6 @@ def recover_stuck_analyses(max_age=timedelta(minutes=5)):
         log.exception("Could not recover stuck analyses")
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
 @live_bp.route('/get-token', methods=['POST'])
 @require_auth
 @user_rate_limit('get-token', 20, 3600)
@@ -329,8 +305,7 @@ def get_token():
     latitude = request.form.get('latitude')
     longitude = request.form.get('longitude')
 
-    # The reporter is whoever is signed in. A client-supplied uuid can't impersonate someone else.
-    reporter_uuid = g.uid
+    
     ai_mode = resolve_mode(request.form.get('aiMode'))  # DEMO-MODE: ignored unless ENABLE_DEMO_AI_MODE=1
     if request.form.get('uuid') and request.form.get('uuid') != g.uid:
         return error("uuid does not match the signed-in account.", 403)
@@ -354,7 +329,7 @@ def get_token():
         except ValueError:
             return error("Invalid latitude/longitude.", 400)
 
-    # The clip is optional here: the app can go live first and send it afterwards to /verify-clip.
+    
     has_clip = 'video' in request.files
 
     app_id = os.getenv('AGORA_APP_ID')
@@ -365,25 +340,25 @@ def get_token():
 
     db = get_db()
 
-    # A channel name can't be hijacked: if the call already exists it must be the caller's own.
+    
     call_ref = db.collection('ActiveCalls').document(channel_name)
     existing = call_ref.get()
     if existing.exists and (existing.to_dict() or {}).get('reporterUuid') != reporter_uuid:
         return error("This channel name is already in use.", 409)
 
     temp_file_path = make_temp_video_path() if has_clip else None
-    handed_off = False  # once the background task owns the temp file, it is the one that deletes it
+    handed_off = False  
     try:
         if has_clip:
             request.files['video'].save(temp_file_path)
             if os.path.getsize(temp_file_path) == 0:
                 return error("The video file is empty.", 400)
 
-        # --- Go live immediately: token + call record with provisional values ---
+       
         privilege_expired_ts = int(time.time()) + 3600
         token = RtcTokenBuilder.buildTokenWithUid(app_id, app_certificate, channel_name, uid, 1, privilege_expired_ts)
 
-        now = datetime.now(timezone.utc)  # doubles as the call's identity for the background tasks
+        now = datetime.now(timezone.utc) 
         call_payload = {
             'channelName': channel_name,
             'reporterUuid': reporter_uuid,
@@ -392,7 +367,7 @@ def get_token():
             'threatLevel': UNKNOWN_THREAT_LEVEL,
             'ai_assessment': PENDING_ASSESSMENT,
             'timestamp': now,
-            'aiMode': ai_mode,  # DEMO-MODE
+            'aiMode': ai_mode, 
         }
         if has_clip:
             call_payload['aiClipSubmittedAt'] = now
@@ -403,7 +378,7 @@ def get_token():
         }
 
         if lat_val is not None:
-            # Address starts as the old fallback text; _fill_address swaps in the real one a moment later.
+    
             call_payload['location'] = {'latitude': lat_val, 'longitude': lon_val, 'address': "Location found"}
             call_payload['assignedStation'] = find_nearest_police_station(lat_val, lon_val) or unassigned_station
         else:
@@ -411,7 +386,7 @@ def get_token():
 
         call_ref.set(call_payload)
 
-        # --- Everything slow happens after this point, off the request ---
+
         if has_clip:
             try:
                 _executor.submit(_run_analysis, channel_name, now, temp_file_path, ai_mode)
@@ -436,11 +411,10 @@ def get_token():
             "token": token,
             "channelName": channel_name,
             "uid": uid,
-            "aiMode": ai_mode,  # DEMO-MODE: lets the app show which mode is active
+            "aiMode": ai_mode,  
             "message": ("Live session started. AI verification is running in the background." if has_clip
                         else "Live session started. Send the verification clip to /verify-clip."),
-            "clipExpected": not has_clip,  # True = the app should now record and POST the clip to /verify-clip
-            # Same shape the client used to receive, filled with provisional values.
+            "clipExpected": not has_clip, 
             "assessment": {
                 "pending": True,
                 "threat_level": UNKNOWN_THREAT_LEVEL,
@@ -462,8 +436,6 @@ def get_token():
 @require_auth
 @user_rate_limit('verify-clip', 20, 3600)
 def verify_clip():
-    """Second half of 'stream first, verify in parallel': the app is already live and sends the short
-    verification clip as soon as it has recorded it. Analysis then runs in the background as usual."""
     channel_name = request.form.get('channelName')
     if not channel_name or 'video' not in request.files:
         return error("Missing channelName or video file.", 400)
@@ -517,6 +489,7 @@ def verify_clip():
 @require_auth
 @user_rate_limit('upload-evidence', 30, 3600)
 def upload_evidence():
+
     channel_name = request.form.get('channelName')
 
     if not channel_name or 'video' not in request.files:
@@ -550,8 +523,6 @@ def upload_evidence():
         blob = get_bucket().blob(blob_path)
         blob.upload_from_filename(temp_file_path, content_type='video/mp4')
 
-        # Evidence stays PRIVATE (it used to be make_public(): anyone with the URL could watch it).
-        # Consumers get a time-limited link; /evidence/<channel> issues fresh ones on demand.
         evidence_url = signed_url(blob_path, timedelta(days=6))
         call_ref.update({
             'evidencePath': blob_path,
