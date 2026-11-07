@@ -106,12 +106,21 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
                 if token:
                     fcm_tokens.append(token)
 
+        fcm_tokens = list(dict.fromkeys(fcm_tokens))  # drop duplicate tokens
         if not fcm_tokens:
             print(f"ℹ️ No active FCM tokens found for units {unit_ids} in station {station_id}.")
             return
 
         # Prepare FCM multicast message
-        units_str = ", ".join(unit_ids) if unit_ids else "Assigned Units"
+        unit_names = []
+        for uid in unit_ids or []:
+            try:
+                unit_doc = db.collection('Units').document(str(uid)).get()
+                name = (unit_doc.to_dict() or {}).get('unitName') if unit_doc.exists else None
+            except Exception:
+                name = None
+            unit_names.append(name or str(uid))  # fall back to the ID if no name is found
+        units_str = ", ".join(unit_names) if unit_names else "Assigned Units"
         json_ids = json.dumps(unit_ids) if unit_ids else "[]"
 
         message = messaging.MulticastMessage(
@@ -120,12 +129,11 @@ def send_push_to_units(station_id, unit_ids, call_id, call_data):
                 "type": "NEW_ASSIGNMENT",
                 "callId": str(call_id),
                 "unitIds": json_ids,
-                "stationId": str(station_id or "")
+                "stationId": str(station_id or ""),
+                "title": "🚨 Emergency Call Assigned",
+                "body": f"Units [{units_str}] have been dispatched to a new call."
             },
-            notification=messaging.Notification(
-                title="🚨 Emergency Call Assigned",
-                body=f"Units [{units_str}] have been dispatched to a new call."
-            )
+            android=messaging.AndroidConfig(priority="high")
         )
 
         response = messaging.send_each_for_multicast(message)
@@ -176,6 +184,7 @@ def send_live_termination_push(call_id, call_data):
             else:
                 print(f"⚠️ User document '{reporter_uuid}' not found in Users collection.")
 
+        fcm_tokens = list(dict.fromkeys(fcm_tokens))  # drop duplicate tokens
         if not fcm_tokens:
             print(f"ℹ️ No active FCM tokens found to terminate call '{call_id}'.")
             db.collection('ActiveCalls').document(call_id).update({'liveEndedNotified': True})
@@ -187,12 +196,11 @@ def send_live_termination_push(call_id, call_data):
             data={
                 "type": "END_LIVE_SESSION",
                 "callId": str(call_id),
-                "status": str(call_data.get('status', 'resolved'))
+                "status": str(call_data.get('status', 'resolved')),
+                "title": "🔒 Emergency Call Resolved",
+                "body": "The incident has been marked as resolved. Closing live session."
             },
-            notification=messaging.Notification(
-                title="🔒 Emergency Call Resolved",
-                body="The incident has been marked as resolved. Closing live session."
-            )
+            android=messaging.AndroidConfig(priority="high")
         )
 
         response = messaging.send_each_for_multicast(message)
