@@ -27,11 +27,22 @@ def get_readable_address(latitude, longitude):
     return None
 
 
+def _is_disabled(station_data):
+    """True if the station is marked disabled (accepts bool or 'true'/'1' strings, any key casing)."""
+    for key, val in station_data.items():
+        if key.lower() == 'disabled':
+            if isinstance(val, str):
+                return val.strip().lower() in ('true', '1', 'yes')
+            return bool(val)
+    return False  # no field = treated as active
+
+
 def find_nearest_police_station(user_lat, user_lon):
     """
-    Finds the geographically closest station. Stations operate 24/7, so no
-    duty/online check is applied. Stations without a Location are skipped.
-    Returns None if no station with coordinates exists.
+    Finds the geographically closest ACTIVE station. Stations marked disabled: true
+    are never selected. Stations operate 24/7, so no duty/online check is applied.
+    Stations without a Location are skipped.
+    Returns None if no eligible station exists.
     """
     from app_core import get_db
     db = get_db()
@@ -44,6 +55,9 @@ def find_nearest_police_station(user_lat, user_lon):
 
         for doc in db.collection('Stations').stream():
             station_data = doc.to_dict() or {}
+
+            if _is_disabled(station_data):
+                continue
 
             geopoint = station_data.get('Location') or station_data.get('location')
             if not geopoint:
@@ -67,7 +81,7 @@ def find_nearest_police_station(user_lat, user_lon):
             })
 
         if not candidates:
-            print("No stations with a valid Location found.")
+            print("No active stations with a valid Location found.")
             return None
 
         return min(candidates, key=lambda s: s["distanceKm"])
