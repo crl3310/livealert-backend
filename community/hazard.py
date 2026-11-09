@@ -21,13 +21,13 @@ log = logging.getLogger(__name__)
 
 community_bp = Blueprint('community', __name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-HAZARD_MODEL = os.getenv("GEMINI_HAZARD_MODEL", "gemini-3.5-flash")  # verify this name is valid for your key
+HAZARD_MODEL = os.getenv("GEMINI_HAZARD_MODEL", "gemini-3.5-flash")  
 
 MAX_HAZARD_IMAGES = 3
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB per photo
 MANILA_TZ = timezone(timedelta(hours=8))
 
-# Real-time stream connections. NOTE: in-memory => run a single process (see DEPLOYMENT.md).
+
 subscribers = []
 _subs_lock = threading.Lock()
 MAX_SSE_CLIENTS = int(os.getenv("MAX_SSE_CLIENTS", "80"))
@@ -35,7 +35,6 @@ SSE_KEEPALIVE_SEC = 25
 
 
 def _sniff_image(data):
-    """Works out the image type from the file's first bytes (not from what the client claims)."""
     if data[:3] == b'\xff\xd8\xff':
         return 'jpg', 'image/jpeg'
     if data[:8] == b'\x89PNG\r\n\x1a\n':
@@ -46,7 +45,6 @@ def _sniff_image(data):
 
 
 def _read_hazard_images(files):
-    """Reads and validates the uploaded photos. Bad files are skipped, never fatal to the report."""
     images = []
     for f in files[:MAX_HAZARD_IMAGES]:
         data = f.read(MAX_IMAGE_BYTES + 1)
@@ -65,7 +63,7 @@ def _read_hazard_images(files):
 
 
 def _upload_hazard_images(hazard_id, images):
-    """Uploads photos to Firebase Storage. Never raises: the report is still saved without photos."""
+    """Uploads photos to Firebase Storage. the report is still saved without photos."""
     stored = []
     try:
         bucket = get_bucket()
@@ -107,7 +105,7 @@ def announce_new_hazard(hazard_data):
 @community_bp.route('/hazards/stream', methods=['GET'])
 @require_auth
 def stream_hazards():
-    """Real-time SSE endpoint. /hazards/stream?lat=14.5026&lon=121.0430 (needs the Authorization header)."""
+    """Real-time SSE endpoint."""
     user_lat = request.args.get('lat', type=float)
     user_lon = request.args.get('lon', type=float)
     if (user_lat is None) != (user_lon is None):
@@ -303,7 +301,7 @@ def get_hazards():
                 "title": hazard_data.get('title'),
                 "category": hazard_data.get('category'),
                 "description": hazard_data.get('description', ''),
-                "status": hazard_data.get('status', 'REPORTED'),
+                "status": hazard_data.get('status', 'reported'),
                 "locationName": hazard_data.get('location', {}).get('address', 'Unknown Area'),
                 "time": formatted_time,
                 "imageUrl": image_url,
