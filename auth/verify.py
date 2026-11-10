@@ -5,6 +5,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from flask import jsonify, request
+from firebase_admin import auth
 from flask_mailman import EmailMessage
 from google.cloud import firestore as gcf
 
@@ -35,6 +36,13 @@ def send_verification():
 
     now = datetime.now(timezone.utc)
     try:
+        # Don't send a code (or burn the cooldown) for an email that already has an account.
+        try:
+            auth.get_user_by_email(email)
+            return error("An account with this email already exists.", 409)
+        except auth.UserNotFoundError:
+            pass
+
         ref = get_db().collection('VerificationCodes').document(email)
 
         # Per-email cooldown: stops someone mail-bombing a victim through our SMTP account.
